@@ -1,5 +1,7 @@
 # maolan-generate
 
+[![crates.io](https://img.shields.io/crates/v/maolan-generate.svg)](https://crates.io/crates/maolan-generate)
+
 `maolan-generate` is the HeartMuLa generation crate from the Maolan project.
 It provides a CLI for prompt-driven music generation and exposes the runtime
 pieces the main Maolan application uses for in-process generation and decode.
