@@ -1375,18 +1375,6 @@ impl<B: Backend> HeartmulaTransformer<B> {
         }
     }
 
-    #[allow(dead_code)]
-    fn forward(
-        &self,
-        mut hidden: Tensor<B, 3>,
-        positions: Tensor<B, 2, Int>,
-    ) -> Result<Tensor<B, 3>> {
-        for layer in &self.layers {
-            hidden = layer.forward(hidden, positions.clone())?;
-        }
-        Ok(self.norm.forward(hidden))
-    }
-
     fn new_cache(&self) -> HeartmulaTransformerCache<B> {
         HeartmulaTransformerCache {
             layers: (0..self.layers.len())
@@ -1433,16 +1421,6 @@ impl<B: Backend> HeartmulaTransformerLayer<B> {
         }
     }
 
-    #[allow(dead_code)]
-    fn forward(&self, hidden: Tensor<B, 3>, positions: Tensor<B, 2, Int>) -> Result<Tensor<B, 3>> {
-        let attn_hidden = self
-            .attn
-            .forward(self.sa_norm.forward(hidden.clone()), positions)?;
-        let hidden = hidden + attn_hidden;
-        let mlp_hidden = self.mlp.forward(self.mlp_norm.forward(hidden.clone()));
-        Ok(hidden + mlp_hidden)
-    }
-
     fn forward_incremental(
         &self,
         hidden: Tensor<B, 3>,
@@ -1486,53 +1464,6 @@ impl<B: Backend> HeartmulaAttention<B> {
                 head_dim,
             }),
         }
-    }
-
-    #[allow(dead_code)]
-    fn forward(&self, hidden: Tensor<B, 3>, positions: Tensor<B, 2, Int>) -> Result<Tensor<B, 3>> {
-        let [batch, seq_len, _] = hidden.dims();
-        let q = self.q_proj.forward(hidden.clone()).reshape([
-            batch,
-            seq_len,
-            self.meta.0.num_heads,
-            self.meta.0.head_dim,
-        ]);
-        let k = self.k_proj.forward(hidden.clone()).reshape([
-            batch,
-            seq_len,
-            self.meta.0.num_kv_heads,
-            self.meta.0.head_dim,
-        ]);
-        let v = self.v_proj.forward(hidden).reshape([
-            batch,
-            seq_len,
-            self.meta.0.num_kv_heads,
-            self.meta.0.head_dim,
-        ]);
-
-        let q = apply_scaled_rope(q, &positions);
-        let k = apply_scaled_rope(k, &positions);
-        let (k, v) = if self.meta.0.num_heads != self.meta.0.num_kv_heads {
-            let repeats = self.meta.0.num_heads / self.meta.0.num_kv_heads;
-            (repeat_kv_heads(k, repeats), repeat_kv_heads(v, repeats))
-        } else {
-            (k, v)
-        };
-
-        let q = q.swap_dims(1, 2);
-        let k = k.swap_dims(1, 2);
-        let v = v.swap_dims(1, 2);
-        let scores = q
-            .matmul(k.clone().swap_dims(2, 3))
-            .mul_scalar(1.0 / (self.meta.0.head_dim as f32).sqrt());
-        let mask = causal_mask::<B>(seq_len, &scores.device());
-        let weights = softmax(scores.mask_fill(mask, -1.0e9), 3);
-        let attended =
-            weights
-                .matmul(v)
-                .swap_dims(1, 2)
-                .reshape([batch, seq_len, HEARTMULA_HIDDEN_SIZE]);
-        Ok(self.output_proj.forward(attended))
     }
 
     fn forward_incremental(
@@ -2228,11 +2159,6 @@ fn history_mask_tensor<B: Backend>(
     )
 }
 
-#[allow(dead_code)]
-fn positions_tensor<B: Backend>(seq_len: usize, device: &B::Device) -> Tensor<B, 2, Int> {
-    Tensor::<B, 1, Int>::arange(0..seq_len as i64, device).reshape([1, seq_len])
-}
-
 fn single_position_tensor<B: Backend>(position: i64, device: &B::Device) -> Tensor<B, 2, Int> {
     Tensor::<B, 2, Int>::from_data([[position]], device)
 }
@@ -2345,7 +2271,6 @@ fn scaled_theta(head_dim: usize) -> Vec<f32> {
         .collect()
 }
 
-#[allow(dead_code)]
 fn causal_mask<B: Backend>(seq_len: usize, device: &B::Device) -> Tensor<B, 4, Bool> {
     let mut mask = Vec::with_capacity(seq_len * seq_len);
     for row in 0..seq_len {
