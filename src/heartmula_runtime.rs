@@ -19,14 +19,6 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
 
-macro_rules! eprintln {
-    ($($arg:tt)*) => {
-        if crate::stderr_logging_enabled() {
-            std::eprintln!($($arg)*);
-        }
-    };
-}
-
 const HEARTMULA_PARALLEL_TOKENS: usize = 9;
 const HEARTMULA_AUDIO_CODEBOOKS: usize = 8;
 const HEARTMULA_HIDDEN_SIZE: usize = 3072;
@@ -336,14 +328,6 @@ impl<B: Backend> HeartmulaModel<B> {
             let chunk_end = ((chunk_idx + 1) * CHUNK_SIZE).min(config.max_audio_frames);
             let frames_in_chunk = chunk_end - chunk_start;
 
-            eprintln!(
-                "  Generating chunk {}/{} (frames {}-{})",
-                chunk_idx + 1,
-                total_chunks,
-                chunk_start,
-                chunk_end - 1
-            );
-
             // Report chunk progress (0-99% for generator phase)
             let progress = (chunk_idx as f32 / total_chunks as f32) * 0.99;
             if let Some(ref mut cb) = config.progress_callback {
@@ -355,7 +339,7 @@ impl<B: Backend> HeartmulaModel<B> {
                     break;
                 }
 
-                let frame_index = frames.len();
+                let _frame_index = frames.len();
                 let next_frame = self.decode_frame_from_last_hidden(
                     device,
                     last_hidden.clone(),
@@ -364,16 +348,10 @@ impl<B: Backend> HeartmulaModel<B> {
                     config.cfg_scale,
                 )?;
                 if next_frame.iter().any(|token| *token >= config.audio_eos_id) {
-                    eprintln!("  EOS token reached at frame {}", frames.len());
                     return Ok(frames);
                 }
 
                 frames.push(next_frame);
-                eprintln!(
-                    "    Finished frame {} / {}",
-                    frame_index + 1,
-                    config.max_audio_frames
-                );
                 let next_row = build_audio_history_row(
                     frames.last().expect("frame was just pushed"),
                     config.empty_id,
@@ -395,7 +373,6 @@ impl<B: Backend> HeartmulaModel<B> {
 
             // Sync device after each chunk to prevent GPU timeout
             // Yield after reclaiming any free transient pages.
-            eprintln!("  Syncing device after chunk {}...", chunk_idx + 1);
             sync_and_cleanup_backend::<B>(device)?;
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -1700,7 +1677,6 @@ pub fn decode_frames_to_wav<B: burn::prelude::Backend>(
 
     let _ = float_size_arg;
     let _ = duration_seconds;
-    eprintln!("decode_frames_to_wav: using Rust HeartCodec decoder");
     decode_frames_to_wav_rust::<B>(
         model_dir,
         frames_json,
@@ -1729,13 +1705,7 @@ fn decode_frames_to_wav_rust<B: burn::prelude::Backend>(
         .with_context(|| format!("failed to read {}", frames_json.display()))?;
     let _payload: HeartmulaJsonOutput = serde_json::from_str(&frames_text)
         .with_context(|| format!("failed to parse {}", frames_json.display()))?;
-    eprintln!("decode_frames_to_wav_rust: seeding backend RNG with 0");
     B::seed(device, 0);
-    eprintln!(
-        "decode_frames_to_wav_rust: model_dir={}",
-        model_dir.display()
-    );
-    eprintln!("decode_frames_to_wav_rust: staging flow-matching decode plan");
     let initial_latent_json =
         prepare_shared_decoder_initial_latent(frames_json, decoder_seed, output_wav)?;
     let stage_plan_json = output_wav.with_extension("heartcodec-stage-plan.bin");
@@ -1754,7 +1724,6 @@ fn decode_frames_to_wav_rust<B: burn::prelude::Backend>(
     sync_and_cleanup_backend::<B>(device)?;
     plan_result?;
 
-    eprintln!("decode_frames_to_wav_rust: flow-matching plan complete; starting scalar decode");
     let decode_result = decode_plan_to_wav_rust::<B>(model_dir, output_wav, device);
     sync_and_cleanup_backend::<B>(device)?;
 
@@ -1762,7 +1731,6 @@ fn decode_frames_to_wav_rust<B: burn::prelude::Backend>(
     let _ = std::fs::remove_file(&initial_latent_json);
 
     decode_result?;
-    eprintln!("decode_frames_to_wav_rust: staged decode complete");
     let _ = duration_seconds;
     Ok(())
 }
@@ -1779,18 +1747,9 @@ pub fn decode_frames_to_plan_rust<B: burn::prelude::Backend>(
     let payload: HeartmulaJsonOutput = serde_json::from_str(&frames_text)
         .with_context(|| format!("failed to parse {}", frames_json.display()))?;
     let frames = payload.frames;
-    eprintln!("decode_frames_to_wav_rust: seeding backend RNG with 0");
     B::seed(device, 0);
     let codes = frames_to_tensor::<B>(&frames, device);
     let codec_path = resolve_heartcodec_burnpack_path(model_dir);
-    eprintln!(
-        "decode_frames_to_wav_rust: model_dir={}",
-        model_dir.display()
-    );
-    eprintln!(
-        "decode_frames_to_wav_rust: codec_path={}",
-        codec_path.display()
-    );
     let flow_matching =
         crate::heartcodec::FlowMatching::<B>::load_from_burnpack(&codec_path, device)?;
     let initial_latent = load_initial_latent_tensor::<B>(initial_latent_json, device)?;
@@ -1826,41 +1785,21 @@ fn write_decoder_wav<B: burn::prelude::Backend>(
 ) -> Result<()> {
     let dims = wav.dims();
     let samples: Vec<f32> = wav.cast(DType::F32).to_data().to_vec::<f32>()?;
-    eprintln!(
-        "decode_frames_to_wav_rust: wav dims={:?} samples_len={}",
-        dims,
-        samples.len()
-    );
     match dims.as_slice() {
         [channels, 1, frames] if *channels > 1 => {
-            eprintln!(
-                "decode_frames_to_wav_rust: writing interleaved stereo/multichannel wav channels={} frames={}",
-                channels, frames
-            );
             crate::heartcodec::write_wav_from_f32_interleaved(
                 &samples, *channels, *frames, 48_000, output_wav,
             )
         }
         [1, channels, frames] if *channels > 1 => {
-            eprintln!(
-                "decode_frames_to_wav_rust: writing interleaved wav from [1, channels, frames] channels={} frames={}",
-                channels, frames
-            );
             crate::heartcodec::write_wav_from_f32_interleaved(
                 &samples, *channels, *frames, 48_000, output_wav,
             )
         }
         [1, 1, frames] => {
-            eprintln!(
-                "decode_frames_to_wav_rust: writing mono wav frames={}",
-                frames
-            );
             crate::heartcodec::write_wav_from_f32(&samples[..*frames], 48_000, output_wav)
         }
-        _ => {
-            eprintln!("decode_frames_to_wav_rust: writing fallback mono wav");
-            crate::heartcodec::write_wav_from_f32(&samples, 48_000, output_wav)
-        }
+        _ => crate::heartcodec::write_wav_from_f32(&samples, 48_000, output_wav),
     }
 }
 

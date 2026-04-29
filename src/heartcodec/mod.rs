@@ -18,13 +18,6 @@ use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 
-macro_rules! eprintln {
-    ($($arg:tt)*) => {
-        if crate::stderr_logging_enabled() {
-            std::eprintln!($($arg)*);
-        }
-    };
-}
 // Re-export conv modules for use in model
 pub use conv::PostProcessor;
 pub use conv::{PlainConv1d, WNConv1d, WNConvTranspose1d};
@@ -128,7 +121,6 @@ impl<B: Backend> HeartCodecModel<B> {
     /// Higher values (15-20) = best quality, slower
     pub fn with_ode_steps(mut self, steps: usize) -> Self {
         self.ode_steps = steps.clamp(1, 50);
-        eprintln!("  Set ODE steps to {}", self.ode_steps);
         self
     }
 
@@ -138,10 +130,6 @@ impl<B: Backend> HeartCodecModel<B> {
     /// Higher = stronger guidance (may be more stable)
     pub fn with_guidance_scale(mut self, scale: f32) -> Self {
         self.guidance_scale = scale.max(1.0);
-        eprintln!(
-            "  Set flow matching guidance scale to {}",
-            self.guidance_scale
-        );
         self
     }
 
@@ -191,8 +179,6 @@ impl<B: Backend> HeartCodecModel<B> {
         // Load estimator
         let estimator = LlamaTransformer::load_from_burnpack(device, get_tensor)?;
 
-        eprintln!("    Loaded FlowMatching components");
-
         Ok(FlowMatching {
             cond_feature_emb,
             zero_cond_embedding1: Param::from_tensor(zero_cond_embedding1),
@@ -239,24 +225,16 @@ impl<B: Backend> HeartCodecModel<B> {
         {
             Ok(flow_matching) => {
                 model.flow_matching = flow_matching;
-                eprintln!("  Loaded flow_matching weights from burnpack");
             }
-            Err(e) => {
-                eprintln!("  Warning: Could not load flow_matching: {}", e);
-                eprintln!("    Using randomly initialized weights for flow_matching");
-            }
+            Err(_e) => {}
         }
 
         // Try to load scalar_model weights manually
         match ScalarModel::load_from_dot_notation(path, device, &get_tensor) {
             Ok(scalar_model) => {
-                eprintln!("  Loaded scalar_model weights from burnpack");
                 model.scalar_model = scalar_model;
             }
-            Err(e) => {
-                eprintln!("  Warning: Could not load scalar_model: {}", e);
-                eprintln!("    Using randomly initialized weights for scalar_model");
-            }
+            Err(_e) => {}
         }
 
         Ok(model)
@@ -299,20 +277,10 @@ impl<B: Backend> HeartCodecModel<B> {
         let device = codes.device();
         let [batch, num_quantizers, seq_len] = codes.dims();
         assert_eq!(batch, 1, "HeartCodec decode expects a single code batch");
-        eprintln!(
-            "HeartCodec.decode: codes shape = {:?}, num_quantizers = {}, seq_len = {}",
-            codes.dims(),
-            num_quantizers,
-            seq_len
-        );
 
         let duration_seconds = seq_len as f32 / 12.5;
         let segment_duration_seconds = HEARTCODEC_SEGMENT_DURATION_SECONDS;
         let latent_length = (segment_duration_seconds * 25.0) as usize;
-        eprintln!(
-            "HeartCodec.decode: duration_seconds = {:.3}, latent_length = {}",
-            duration_seconds, latent_length
-        );
         assert_eq!(
             first_latent.dims(),
             [batch, latent_length, 256],
@@ -347,14 +315,6 @@ impl<B: Backend> HeartCodecModel<B> {
             codes = codes.slice([0..batch, 0..num_quantizers, 0..len_codes]);
             codes_len = len_codes;
         }
-        eprintln!(
-            "HeartCodec.decode: first_latent shape = {:?}, segment_duration_seconds = {:.2}, min_samples = {}, hop_samples = {}, ovlp_samples = {}",
-            first_latent.dims(),
-            segment_duration_seconds,
-            min_samples,
-            hop_samples,
-            ovlp_samples
-        );
 
         let mut windows = Vec::new();
         let mut previous_latent: Option<Tensor<B, 3>> = None;
@@ -364,10 +324,6 @@ impl<B: Backend> HeartCodecModel<B> {
             let codes_input = codes
                 .clone()
                 .slice([0..batch, 0..num_quantizers, sinx..window_end]);
-            eprintln!(
-                "HeartCodec.decode: codes_input shape = {:?}",
-                codes_input.dims()
-            );
             let window_latent_length = codes_input.dims()[2] * 2;
 
             if sinx == 0 || ovlp_frames == 0 {
@@ -456,10 +412,6 @@ impl<B: Backend> HeartCodecModel<B> {
 
         for scalar_input in plan.windows {
             let mut cur_output = scalar_model.decode_with_sync(scalar_input);
-            eprintln!(
-                "HeartCodec.decode: decoded audio shape = {:?}",
-                cur_output.dims()
-            );
             let cur_output_dims = cur_output.dims();
             cur_output = cur_output.slice([
                 0..cur_output_dims[0],
@@ -543,26 +495,13 @@ impl<B: Backend> HeartCodecModel<B> {
 
     fn latent_to_scalar_input(latent: Tensor<B, 3>) -> Tensor<B, 3> {
         let [batch, seq_len, channels] = latent.dims();
-        eprintln!(
-            "HeartCodec.decode_window: flow matching latent shape = [{}, {}, {}]",
-            batch, seq_len, channels
-        );
         assert_eq!(channels, 256, "Expected 256 channels from flow matching");
 
         let latent_reshaped = latent.reshape([batch, seq_len, 2, 128]);
         let latent_permuted = latent_reshaped.swap_dims(1, 2);
         let latent_split = latent_permuted.reshape([batch * 2, seq_len, 128]);
-        eprintln!(
-            "HeartCodec.decode_window: latent_split shape = {:?}",
-            latent_split.dims()
-        );
 
-        let scalar_input = latent_split.swap_dims(1, 2);
-        eprintln!(
-            "HeartCodec.decode_window: scalar input shape = {:?}",
-            scalar_input.dims()
-        );
-        scalar_input
+        latent_split.swap_dims(1, 2)
     }
 
     pub fn build_scalar_decode_plan(
@@ -726,14 +665,6 @@ impl<B: Backend> FlowMatching<B> {
             Tensor::<B, 3>::ones([batch, seq_len_interp, 512], &device) - active_mask.clone();
         let cond_with_mask = cond_interp.clone() * active_mask + zero_cond.clone() * inactive_mask;
         let uncond_mask = Tensor::<B, 3>::zeros([batch, seq_len_interp, 512], &device);
-        eprintln!(
-            "FlowMatching.solve_ode: cond_interp = {:?}, cond_with_mask = {:?}, zero_cond = {:?}, latent_masks len = {}, masked_incontext_length = {}",
-            cond_interp.dims(),
-            cond_with_mask.dims(),
-            zero_cond.dims(),
-            latent_masks.len(),
-            masked_incontext_length
-        );
 
         // Initialize with random noise (following Python: torch.randn)
         let mut latent = if let Some(initial_latent) = initial_latent_override {
@@ -750,10 +681,6 @@ impl<B: Backend> FlowMatching<B> {
                 &device,
             )
         };
-        eprintln!(
-            "FlowMatching.solve_ode: initial latent shape = {:?}",
-            latent.dims()
-        );
         let incontext_mask = latent_masks
             .iter()
             .map(|&m| if m == 1 { 1_i64 } else { 0_i64 })
@@ -772,11 +699,6 @@ impl<B: Backend> FlowMatching<B> {
 
         // Simple Euler integration
         let dt = 1.0 / num_steps as f32;
-
-        eprintln!(
-            "FlowMatching.solve_ode: starting ODE integration with {} steps",
-            num_steps
-        );
 
         // Adaptive sync frequency based on number of steps
         // More steps = sync more frequently to prevent timeout
@@ -1244,12 +1166,6 @@ impl<B: Backend> LlamaTransformer<B> {
             "flow_matching.estimator.scale_shift_table_2",
             [2, inner_dim_2],
         )?;
-
-        eprintln!(
-            "  Loaded LlamaTransformer with {} + {} blocks",
-            transformer_blocks.len(),
-            transformer_blocks_2.len()
-        );
 
         Ok(Self {
             proj_in,
@@ -2043,16 +1959,11 @@ impl<B: Backend> ProjectLayer<B> {
                     padding: burn::module::Ignored(PaddingConfig1d::Explicit(padding, padding)),
                 }
             } else {
-                eprintln!(
-                    "    Warning: {} ffn_1 shape mismatch, using initialized",
-                    prefix
-                );
                 Conv1dConfig::new(in_channels, out_channels, kernel_size)
                     .with_padding(PaddingConfig1d::Explicit(padding, padding))
                     .init(device)
             }
         } else {
-            eprintln!("    Warning: {} ffn_1 not found, using initialized", prefix);
             Conv1dConfig::new(in_channels, out_channels, kernel_size)
                 .with_padding(PaddingConfig1d::Explicit(padding, padding))
                 .init(device)
@@ -2292,7 +2203,6 @@ impl<B: Backend> ScalarModel<B> {
         // This matches Python's round_func9 in sq_codec.py
         let x_quantized = (x.clone() * 9.0).round() / 9.0;
 
-        eprintln!("ScalarModel.decode_with_sync: starting decode");
         let h = self.decoder_0.forward(x_quantized);
         let _ = h.to_data(); // Sync after decoder_0
 
@@ -2314,9 +2224,7 @@ impl<B: Backend> ScalarModel<B> {
         let h = self.decoder_6.forward(h);
         let _ = h.to_data(); // Sync after decoder_6
 
-        let h = self.decoder_7.forward(h);
-        eprintln!("ScalarModel.decode_with_sync: finished decode");
-        h
+        self.decoder_7.forward(h)
     }
 
     pub fn decode_latent_with_sync(&self, latent: Tensor<B, 3>) -> Tensor<B, 3> {
@@ -2329,16 +2237,8 @@ impl<B: Backend> ScalarModel<B> {
         let latent_reshaped = latent.reshape([batch, seq_len, 2, 128]);
         let latent_permuted = latent_reshaped.swap_dims(1, 2);
         let latent_split = latent_permuted.reshape([batch * 2, seq_len, 128]);
-        eprintln!(
-            "HeartCodec.decode_window: latent_split shape = {:?}",
-            latent_split.dims()
-        );
 
         let scalar_input = latent_split.swap_dims(1, 2);
-        eprintln!(
-            "HeartCodec.decode_window: scalar input shape = {:?}",
-            scalar_input.dims()
-        );
         self.decode_with_sync(scalar_input)
     }
 }
@@ -2764,13 +2664,6 @@ fn write_wav_float32_impl(
     path: &std::path::Path,
     fill_payload: impl FnOnce(&mut [u8]),
 ) -> Result<()> {
-    eprintln!(
-        "write_wav_float32_impl: rayon_threads={} available_parallelism={}",
-        rayon::current_num_threads(),
-        std::thread::available_parallelism()
-            .map(|threads| threads.get().to_string())
-            .unwrap_or_else(|_| "unknown".to_string())
-    );
     let channels = u16::try_from(channels).context("float WAV channel count exceeds u16")?;
     let bits_per_sample = 32_u16;
     let bytes_per_sample = usize::from(bits_per_sample / 8);
@@ -2908,14 +2801,9 @@ where
             // Already in correct format
             Tensor::<B, 2>::from_data(TensorData::new(data, [in_dim, out_dim]), device)
         } else {
-            eprintln!(
-                "    Warning: {} weight shape {:?} != [{}, {}] or [{}, {}], using zeros",
-                prefix, shape, out_dim, in_dim, in_dim, out_dim
-            );
             Tensor::zeros([in_dim, out_dim], device)
         }
     } else {
-        eprintln!("    Warning: {} weight not found, using zeros", weight_name);
         Tensor::zeros([in_dim, out_dim], device)
     };
 
@@ -2927,10 +2815,6 @@ where
                 device,
             ))
         } else {
-            eprintln!(
-                "    Warning: {} bias shape {:?} != [{}], using zeros",
-                prefix, shape, out_dim
-            );
             Some(Tensor::zeros([out_dim], device))
         }
     } else {
@@ -2959,14 +2843,9 @@ where
         if shape.len() == 1 && shape[0] == dim {
             Tensor::<B, 1>::from_data(TensorData::new(data, [dim]), device)
         } else {
-            eprintln!(
-                "    Warning: {} weight shape {:?} != [{}], using ones",
-                prefix, shape, dim
-            );
             Tensor::ones([dim], device)
         }
     } else {
-        eprintln!("    Warning: {} not found, using ones", weight_name);
         Tensor::ones([dim], device)
     };
 

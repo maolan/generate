@@ -23,14 +23,6 @@ const HEARTCODEC_REPO_ID: &str = "maolandaw/HeartCodec-oss-20260123-burn";
 const HEARTMULA_TOKENIZER_REL: &str = "tokenizer.json";
 const HEARTMULA_GEN_CONFIG_REL: &str = "gen_config.json";
 
-macro_rules! eprintln {
-    ($($arg:tt)*) => {
-        if maolan_generate::stderr_logging_enabled() {
-            std::eprintln!($($arg)*);
-        }
-    };
-}
-
 struct HeartmulaModelPaths {
     model_dir: PathBuf,
     heartcodec_model_dir: PathBuf,
@@ -72,7 +64,6 @@ fn main() -> Result<()> {
     let options = match parse_options(env::args_os()) {
         Ok(options) => options,
         Err(err) if err.to_string() == help_text() => {
-            println!("{}", help_text());
             return Ok(());
         }
         Err(err) => return Err(err),
@@ -85,12 +76,6 @@ fn main() -> Result<()> {
     if env::var_os(HEARTMULA_GENERATE_ONLY_ENV).is_none() {
         return run_heartmula_supervisor(&options);
     }
-
-    eprintln!(
-        "generate: mode=cli model={} backend={}",
-        model_name(options.model),
-        backend_name(options.backend),
-    );
 
     run_heartmula_cli(&options)
 }
@@ -128,17 +113,11 @@ fn run_decode_with_frames_json(
     frames_json: &Path,
 ) -> Result<()> {
     let model_paths = resolve_heartmula_model_paths(options.model_dir.as_deref(), options.model)?;
-    println!(
-        "decode_only_model_dir={}",
-        model_paths.heartcodec_model_dir.display()
-    );
-    println!("decode_only_frames_json={}", frames_json.display());
     if let Some(threads) = options.decode_threads {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build_global()
             .with_context(|| format!("failed to set decode thread count to {threads}"))?;
-        println!("decode_only_threads={threads}");
     }
     match options.backend {
         BackendChoice::Cpu => run_decode_only_with_backend::<burn::backend::NdArray<f32>>(
@@ -220,9 +199,7 @@ fn spawn_generate_subprocess(options: &maolan_generate::CliOptions) -> Result<()
 
 fn run_heartmula_supervisor(options: &maolan_generate::CliOptions) -> Result<()> {
     let frames_json_path = options.output_path.with_extension("frames.json");
-    eprintln!("generate: spawning HeartMuLa generation subprocess");
     spawn_generate_subprocess(options)?;
-    eprintln!("generate: generation subprocess exited; starting in-process decode");
     run_decode_with_frames_json(options, &frames_json_path)
 }
 
@@ -230,11 +207,6 @@ fn run_ipc() -> Result<()> {
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
     let options = validate_options(read_ipc_message(&mut stdin)?)?;
-    eprintln!(
-        "generate: mode=ipc model={} backend={}",
-        model_name(options.model),
-        backend_name(options.backend),
-    );
 
     let output = match catch_ipc_generation_failure(AssertUnwindSafe(|| match options.backend {
         BackendChoice::Cpu => {
@@ -272,11 +244,6 @@ fn run_ipc() -> Result<()> {
     };
 
     write_ipc_message(&mut stdout, &output.header)?;
-    eprintln!(
-        "generate: mode=ipc complete backend={} output={}",
-        backend_name(options.backend),
-        options.output_path.display()
-    );
     Ok(())
 }
 
@@ -576,15 +543,7 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
     let _ = std::fs::remove_file(&frames_json_path);
 
     // Sync backend to ensure all pending GPU operations complete before process exit
-    eprintln!("generate: syncing backend before exit...");
     release_backend_allocations::<B>(device)?;
-
-    eprintln!(
-        "generate: ipc backend={} frames={} output={}",
-        backend_name(backend),
-        generated_frame_count,
-        output_wav_path.display()
-    );
 
     let header = GenerateResponseHeader {
         backend,
@@ -602,7 +561,7 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
 
 fn inspect_heartmula_cli(options: &maolan_generate::CliOptions) -> Result<()> {
     let model_paths = resolve_heartmula_model_paths(options.model_dir.as_deref(), options.model)?;
-    let config = load_heartmula_gen_config(&model_paths.gen_config_json)?;
+    let _config = load_heartmula_gen_config(&model_paths.gen_config_json)?;
     let heartmula_summary =
         summarize_burnpack(&model_paths.heartmula_raw_bpk, heartmula_required_tensors())?;
     let heartcodec_summary = summarize_burnpack(
@@ -610,56 +569,35 @@ fn inspect_heartmula_cli(options: &maolan_generate::CliOptions) -> Result<()> {
         heartcodec_required_tensors(),
     )?;
     let runtime_summary = inspect_heartmula_runtime(&model_paths)?;
-    println!("generate");
-    println!("model=heartmula");
-    println!("model_dir={}", model_paths.model_dir.display());
+    println!("HeartMuLa tensors: {}", heartmula_summary.tensor_count);
+    println!("HeartCodec tensors: {}", heartcodec_summary.tensor_count);
+    println!("text_vocab_size: {}", runtime_summary.text_vocab_size);
+    println!("audio_vocab_size: {}", runtime_summary.audio_vocab_size);
+    println!("hidden_size: {}", runtime_summary.hidden_size);
     println!(
-        "heartmula_raw_bpk={}",
-        model_paths.heartmula_raw_bpk.display()
-    );
-    println!(
-        "heartcodec_raw_bpk={}",
-        model_paths.heartcodec_raw_bpk.display()
-    );
-    println!("tokenizer_json={}", model_paths.tokenizer_json.display());
-    println!("gen_config_json={}", model_paths.gen_config_json.display());
-    println!("heartmula_tensor_count={}", heartmula_summary.tensor_count);
-    println!(
-        "heartcodec_tensor_count={}",
-        heartcodec_summary.tensor_count
-    );
-    println!("text_bos_id={}", config.text_bos_id);
-    println!("text_eos_id={}", config.text_eos_id);
-    println!("audio_eos_id={}", config.audio_eos_id);
-    println!("empty_id={}", config.empty_id);
-    println!("text_vocab_size={}", runtime_summary.text_vocab_size);
-    println!("audio_vocab_size={}", runtime_summary.audio_vocab_size);
-    println!("hidden_size={}", runtime_summary.hidden_size);
-    println!(
-        "audio_codebook_count={}",
+        "audio_codebook_count: {}",
         runtime_summary.audio_codebook_count
     );
     println!(
-        "audio_head_vocab_size={}",
+        "audio_head_vocab_size: {}",
         runtime_summary.audio_head_vocab_size
     );
     println!(
-        "backbone_layer_count={}",
+        "backbone_layer_count: {}",
         runtime_summary.backbone_layer_count
     );
     println!(
-        "decoder_layer_count={}",
+        "decoder_layer_count: {}",
         runtime_summary.decoder_layer_count
     );
     println!(
-        "codec_condition_width={}",
+        "codec_condition_width: {}",
         runtime_summary.codec_condition_width
     );
     println!(
-        "codec_scalar_decoder_channels={}",
+        "codec_scalar_decoder_channels: {}",
         runtime_summary.codec_scalar_decoder_channels
     );
-    println!("inspect_only=true");
     Ok(())
 }
 
@@ -907,9 +845,9 @@ where
     let model_paths = resolve_heartmula_model_paths(options.model_dir.as_deref(), options.model)?;
     let config = load_heartmula_gen_config(&model_paths.gen_config_json)?;
     let runtime_summary = inspect_heartmula_runtime(&model_paths)?;
-    let heartmula_summary =
+    let _heartmula_summary =
         summarize_burnpack(&model_paths.heartmula_raw_bpk, heartmula_required_tensors())?;
-    let heartcodec_summary = summarize_burnpack(
+    let _heartcodec_summary = summarize_burnpack(
         &model_paths.heartcodec_raw_bpk,
         heartcodec_required_tensors(),
     )?;
@@ -944,24 +882,12 @@ where
         progress_callback: None,
     };
     let frames = model.generate_frames(&device, &mut generation_config)?;
-    let generated_frame_count = frames.len();
+    let _generated_frame_count = frames.len();
     let frames_json_path = options.output_path.with_extension("frames.json");
     heartmula_runtime::write_frames_json(&frames_json_path, &lyrics, &tags, &frames)?;
-    println!("frames_predecode={}", frames_json_path.display());
     if env::var_os(HEARTMULA_GENERATE_ONLY_ENV).is_some() {
-        eprintln!("generate: unloading HeartMuLa before process exit");
         drop(model);
         release_backend_allocations::<B>(&device)?;
-        println!("generate");
-        println!("model=heartmula");
-        println!("mode=tokens");
-        println!("model_dir={}", model_paths.model_dir.display());
-        println!("backend={}", backend_name(backend));
-        println!("cfg_scale={}", options.cfg_scale);
-        println!("generated_frame_count={}", generated_frame_count);
-        println!("frames_json={}", frames_json_path.display());
-        println!("runtime=heartmula-burn");
-        println!("note=HeartMuLa token generation completed in a dedicated subprocess");
         return Ok(());
     }
     drop(model);
@@ -977,54 +903,6 @@ where
         options.ode_steps,
         options.decoder_seed,
     )?;
-    println!("generate");
-    println!("model=heartmula");
-    println!("mode=tokens");
-    println!("model_dir={}", model_paths.model_dir.display());
-    println!("backend={}", backend_name(backend));
-    println!("cfg_scale={}", options.cfg_scale);
-    println!("ode_steps={}", options.ode_steps);
-    println!("heartmula_tensor_count={}", heartmula_summary.tensor_count);
-    println!(
-        "heartcodec_tensor_count={}",
-        heartcodec_summary.tensor_count
-    );
-    println!("text_bos_id={}", config.text_bos_id);
-    println!("text_eos_id={}", config.text_eos_id);
-    println!("audio_eos_id={}", config.audio_eos_id);
-    println!("empty_id={}", config.empty_id);
-    println!("text_vocab_size={}", runtime_summary.text_vocab_size);
-    println!("audio_vocab_size={}", runtime_summary.audio_vocab_size);
-    println!("hidden_size={}", runtime_summary.hidden_size);
-    println!(
-        "audio_codebook_count={}",
-        runtime_summary.audio_codebook_count
-    );
-    println!(
-        "audio_head_vocab_size={}",
-        runtime_summary.audio_head_vocab_size
-    );
-    println!(
-        "backbone_layer_count={}",
-        runtime_summary.backbone_layer_count
-    );
-    println!(
-        "decoder_layer_count={}",
-        runtime_summary.decoder_layer_count
-    );
-    println!(
-        "codec_condition_width={}",
-        runtime_summary.codec_condition_width
-    );
-    println!(
-        "codec_scalar_decoder_channels={}",
-        runtime_summary.codec_scalar_decoder_channels
-    );
-    println!("generated_frame_count={}", generated_frame_count);
-    println!("frames_json={}", frames_json_path.display());
-    println!("output_wav={}", options.output_path.display());
-    println!("runtime=heartmula-burn");
-    println!("note=Burn token generation succeeded; HeartCodec detokenization raised wav output");
     Ok(())
 }
 
