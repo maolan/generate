@@ -2,7 +2,7 @@
 name = "maolan-generate"
 default-run = "maolan-generate"
 description = "Generate music using Maolan and HeartMuLa"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 license = "BSD-2-Clause"
 readme = "README.md"
@@ -12,6 +12,9 @@ repository = "https://github.com/maolan/generate"
 homepage = "https://maolan.github.io"
 keywords = ["audio", "ai", "generate"]
 categories = ["multimedia::audio"]
+
+[patch.crates-io]
+esaxx-rs = { git = "https://github.com/maolan/esaxx" }
 
 [features]
 default = []

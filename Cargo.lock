@@ -1734,8 +1734,7 @@ dependencies = [
 [[package]]
 name = "esaxx-rs"
 version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6"
+source = "git+https://github.com/maolan/esaxx#327e012df843ad91d1b0ca11bdb5e78e806fc9b2"
 dependencies = [
  "cc",
 ]
@@ -2825,7 +2824,7 @@ dependencies = [
 
 [[package]]
 name = "maolan-generate"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "anyhow",
  "burn",
