@@ -110,62 +110,7 @@ cargo clippy -p maolan-generate --all-targets
 
 Building on Windows requires MSVC and a few environment variables.
 
-#### 1. Install dependencies
-
-1. **Rust** — Install via [rustup](https://rustup.rs/):
-   ```powershell
-   winget install Rustlang.Rustup
-   rustup target add x86_64-pc-windows-msvc
-   ```
-
-2. **Visual Studio 2022** — Install the *Desktop development with C++* workload.
-
-3. **LLVM** — Required by `burn` dependencies (bindgen). Install from [llvm.org](https://releases.llvm.org/) or winget:
-   ```powershell
-   winget install LLVM.LLVM
-   ```
-
-4. **NSIS** — Required to build the installer:
-   ```powershell
-   # Download https://prdownloads.sourceforge.net/nsis/nsis-3.10.zip
-   # Extract to C:\nsis-3.10 (or anywhere local)
-   ```
-
-#### 2. Set environment variables
-
-```powershell
-$env:LIBCLANG_PATH = 'C:\Program Files\LLVM\bin'
-```
-
-#### 3. Build the binary
-
-```powershell
-cargo build --release --target x86_64-pc-windows-msvc
-```
-
-If building from a network share, use a local target directory:
-
-```powershell
-cargo build --release --target x86_64-pc-windows-msvc --target-dir C:\cargo-target
-```
-
-#### 4. Build the installer
-
-The installer bundles the executable and the VC++ Redistributable.
-
-1. Download the VC++ Redistributable to the repo root:
-   ```powershell
-   Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile '..\vc_redist.x64.exe'
-   ```
-
-2. Compile the installer:
-   ```powershell
-   C:\nsis-3.10\makensis.exe installer.nsi
-   ```
-
-The output is `maolan-generate-setup.exe` in the `generate/` directory.
-
-> **Note:** This crate depends on `burn` → `tokenizers` → `esaxx-rs`. For standalone builds, the `[patch.crates-io]` entry in `Cargo.toml` points to a patched fork that removes a Windows CRT conflict. When building through the DAW, the DAW's patch applies automatically.
+`powershell -ExecutionPolicy Bypass -File "\\172.16.0.254\repos\maolan\generate\build.ps1"`
 
 ### Standalone usage note
 

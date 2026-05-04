@@ -2,7 +2,7 @@
 name = "maolan-generate"
 default-run = "maolan-generate"
 description = "Generate music using Maolan and HeartMuLa"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2024"
 license = "BSD-2-Clause"
 readme = "README.md"
