@@ -1,4 +1,4 @@
-// Generated from ONNX "stable_audio_dit.onnx" by burn-onnx
+
 use burn::prelude::*;
 use burn::nn::LayerNorm;
 use burn::nn::LayerNormConfig;

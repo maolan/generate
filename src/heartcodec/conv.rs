@@ -11,11 +11,10 @@ use burn::tensor::ops::{ConvOptions, ConvTransposeOptions, PadMode};
 #[derive(Module, Debug)]
 pub struct WNConv1d<B: Backend> {
     pub bias: Param<Tensor<B, 1>>,
-    // Weight normalization decomposition
-    pub weight_g: Param<Tensor<B, 3>>, // [out_ch, 1, 1]
-    pub weight_v: Param<Tensor<B, 3>>, // [out_ch, in_ch/groups, kernel]
 
-    // Config (not saved)
+    pub weight_g: Param<Tensor<B, 3>>,
+    pub weight_v: Param<Tensor<B, 3>>,
+
     pub stride: usize,
     pub padding: usize,
     pub dilation: usize,
@@ -58,30 +57,19 @@ impl<B: Backend> WNConv1d<B> {
         let g = self.weight_g.val();
         let v = self.weight_v.val();
 
-        // Compute norm of v along last two dimensions
-        // v: [out_ch, in_ch/groups, kernel]
-        // After sum_dim(2): [out_ch, in_ch/groups]
-        // After sum_dim(1): [out_ch]
         let v_norm_sq = v.clone().powf_scalar(2.0).sum_dim(2).sum_dim(1);
         let v_norm = v_norm_sq.sqrt();
 
-        // Reshape from [out_ch] to [out_ch, 1, 1] for broadcasting
-        // Use reshape instead of multiple unsqueeze operations
         let out_ch = v_norm.dims()[0];
         let v_norm = v_norm.reshape([out_ch, 1, 1]);
 
-        // weight = g * v / ||v||
         g * v / (v_norm + 1e-12)
     }
 
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
-        // Compute the actual weight
         let weight = self.compute_weight();
         let bias = self.bias.val();
 
-        // Use Burn's conv1d operation
-        // x: [batch, in_channels, length]
-        // weight: [out_channels, in_channels/groups, kernel_size]
         let left_padding = if self.causal {
             self.dilation * (self.kernel_size().saturating_sub(1))
         } else {
@@ -99,7 +87,6 @@ impl<B: Backend> WNConv1d<B> {
             self.groups,
         );
 
-        // Perform convolution
         conv1d(x, weight, Some(bias), options)
     }
 
@@ -113,9 +100,9 @@ impl<B: Backend> WNConv1d<B> {
 #[derive(Module, Debug)]
 pub struct WNConvTranspose1d<B: Backend> {
     pub bias: Param<Tensor<B, 1>>,
-    // Burn ConvTranspose1d uses [channels_in, channels_out/groups, kernel_size].
-    pub weight_g: Param<Tensor<B, 3>>, // [in_ch, 1, 1]
-    pub weight_v: Param<Tensor<B, 3>>, // [in_ch, out_ch/groups, kernel]
+
+    pub weight_g: Param<Tensor<B, 3>>,
+    pub weight_v: Param<Tensor<B, 3>>,
 
     pub stride: usize,
     pub padding: usize,
@@ -161,17 +148,12 @@ impl<B: Backend> WNConvTranspose1d<B> {
         let g = self.weight_g.val();
         let v = self.weight_v.val();
 
-        // PyTorch's weight_norm on ConvTranspose1d computes norm along dim=0 (input channels)
-        // v: [in_ch, out_ch/groups, kernel] (PyTorch format)
-        // We need to compute norm along dims 1 and 2
         let v_norm_sq = v.clone().powf_scalar(2.0).sum_dim(2).sum_dim(1);
         let v_norm = v_norm_sq.sqrt();
 
-        // Reshape from [in_ch] to [in_ch, 1, 1] for broadcasting
         let in_ch = v_norm.dims()[0];
         let v_norm = v_norm.reshape([in_ch, 1, 1]);
 
-        // weight = g * v / ||v||
         g * v / (v_norm + 1e-12)
     }
 
@@ -179,7 +161,6 @@ impl<B: Backend> WNConvTranspose1d<B> {
         let weight = self.compute_weight();
         let bias = self.bias.val();
 
-        // Use Burn's conv_transpose1d operation
         let options = ConvTransposeOptions::new(
             [self.stride],
             [if self.causal { 0 } else { self.padding }],
@@ -188,8 +169,6 @@ impl<B: Backend> WNConvTranspose1d<B> {
             self.groups,
         );
 
-        // Weight is already in PyTorch format: [in_ch, out_ch/groups, kernel]
-        // No transpose needed
         let x = conv_transpose1d(x, weight, Some(bias), options);
         if self.causal {
             let [batch, channels, time] = x.dims();
@@ -219,21 +198,18 @@ pub fn load_wnconv_from_tensors<B: Backend>(
 ) -> anyhow::Result<WNConv1d<B>> {
     use burn::tensor::TensorData;
 
-    // weight_g shape: [out_ch, 1, 1]
     let (g_data, g_shape) = args.weight_g;
     let weight_g_tensor = Tensor::<B, 3>::from_data(
         TensorData::new(g_data, [g_shape[0], g_shape[1], g_shape[2]]),
         device,
     );
 
-    // weight_v shape: [out_ch, in_ch/groups, kernel]
     let (v_data, v_shape) = args.weight_v;
     let weight_v_tensor = Tensor::<B, 3>::from_data(
         TensorData::new(v_data, [v_shape[0], v_shape[1], v_shape[2]]),
         device,
     );
 
-    // bias shape: [out_ch]
     let bias_tensor = if let Some((b_data, b_shape)) = args.bias {
         Tensor::<B, 1>::from_data(TensorData::new(b_data, [b_shape[0]]), device)
     } else {
@@ -269,23 +245,18 @@ pub fn load_wnconv_transpose_from_tensors<B: Backend>(
 ) -> anyhow::Result<WNConvTranspose1d<B>> {
     use burn::tensor::TensorData;
 
-    // Burn ConvTranspose1d uses [channels_in, channels_out/groups, kernel_size].
-
-    // weight_g shape in checkpoint: [in_ch, 1, 1]
     let (g_data, g_shape) = args.weight_g;
     let weight_g_tensor = Tensor::<B, 3>::from_data(
         TensorData::new(g_data, [g_shape[0], g_shape[1], g_shape[2]]),
         device,
     );
 
-    // weight_v shape in checkpoint: [in_ch, out_ch/groups, kernel]
     let (v_data, v_shape) = args.weight_v;
     let weight_v_tensor = Tensor::<B, 3>::from_data(
         TensorData::new(v_data, [v_shape[0], v_shape[1], v_shape[2]]),
         device,
     );
 
-    // bias shape: [out_ch]
     let bias_tensor = if let Some((b_data, b_shape)) = args.bias {
         Tensor::<B, 1>::from_data(TensorData::new(b_data, [b_shape[0]]), device)
     } else {
@@ -325,8 +296,8 @@ pub fn load_prelu_from_tensor<B: Backend>(
 /// Used for decoder.6 which is a regular Conv1d + PReLU in the original model
 #[derive(Module, Debug)]
 pub struct PlainConv1d<B: Backend> {
-    pub weight: Param<Tensor<B, 3>>, // [out_ch, in_ch/groups, kernel]
-    pub bias: Param<Tensor<B, 1>>,   // [out_ch]
+    pub weight: Param<Tensor<B, 3>>,
+    pub bias: Param<Tensor<B, 1>>,
 
     pub stride: usize,
     pub padding: usize,
@@ -477,14 +448,12 @@ pub fn load_conv1d_from_tensors<B: Backend>(
 ) -> anyhow::Result<PlainConv1d<B>> {
     use burn::tensor::TensorData;
 
-    // weight shape: [out_ch, in_ch/groups, kernel]
     let (w_data, w_shape) = args.weight;
     let weight_tensor = Tensor::<B, 3>::from_data(
         TensorData::new(w_data, [w_shape[0], w_shape[1], w_shape[2]]),
         device,
     );
 
-    // bias shape: [out_ch]
     let bias_tensor = if let Some((b_data, b_shape)) = args.bias {
         Tensor::<B, 1>::from_data(TensorData::new(b_data, [b_shape[0]]), device)
     } else {

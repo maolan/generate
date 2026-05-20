@@ -40,20 +40,9 @@ struct HeartmulaGenConfig {
     empty_id: i64,
 }
 
-struct RawBurnpackSummary {
-    tensor_count: usize,
-}
-
 struct HeartmulaRuntimeSummary {
     text_vocab_size: usize,
-    audio_vocab_size: usize,
-    hidden_size: usize,
-    audio_codebook_count: usize,
     audio_head_vocab_size: usize,
-    backbone_layer_count: usize,
-    decoder_layer_count: usize,
-    codec_condition_width: usize,
-    codec_scalar_decoder_channels: usize,
 }
 
 fn main() -> Result<()> {
@@ -429,7 +418,6 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
     let config = load_heartmula_gen_config(&model_paths.gen_config_json)?;
     let runtime_summary = inspect_heartmula_runtime(&model_paths)?;
 
-    // Send initial progress
     let progress = GenerateProgress {
         phase: "generator".to_string(),
         progress: 0.0,
@@ -454,12 +442,9 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
     let tags_ids = heartmula_runtime::tokenize_text(&model_paths.tokenizer_json, &tags)?;
     let max_audio_frames = (options.length.max(1) / 80).max(1);
 
-    // Use Cell for interior mutability since callback runs on the same thread.
     use std::cell::Cell;
     let last_progress = Cell::new(None::<f32>);
 
-    // Create progress callback that writes directly to stdout
-    // The callback runs synchronously during generate_frames on the main thread
     let progress_callback = |phase: &str, p: f32, op: &str| {
         if should_forward_ipc_progress(last_progress.get(), p) {
             last_progress.set(Some(p));
@@ -487,18 +472,14 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
         progress_callback: Some(Box::new(progress_callback)),
     };
 
-    // Run generation - progress will be reported via callback
     let frames = model.generate_frames(device, &mut generation_config)?;
     let generated_frame_count = frames.len();
 
-    // Drop generation_config to release the stdout borrow from the callback
     std::mem::drop(generation_config);
 
-    // Release generator-side GPU allocations before the decoder starts.
     drop(model);
     release_backend_allocations::<B>(device)?;
 
-    // Write frames to a temp file for decoding (HeartCodec expects a file)
     let temp_dir = std::env::temp_dir();
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -509,7 +490,6 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
 
     heartmula_runtime::write_frames_json(&frames_json_path, &lyrics, &tags, &frames)?;
 
-    // Report decoder phase start
     let progress = GenerateProgress {
         phase: "decoder".to_string(),
         progress: 0.0,
@@ -517,7 +497,6 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
     };
     write_ipc_message(stdout, &progress)?;
 
-    // Decode frames to WAV file
     heartmula_runtime::decode_frames_to_wav::<B>(
         &model_paths.heartcodec_model_dir,
         backend_name(backend),
@@ -530,7 +509,6 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
         options.decoder_seed,
     )?;
 
-    // Report decoder complete
     let progress = GenerateProgress {
         phase: "decoder".to_string(),
         progress: 0.99,
@@ -538,11 +516,8 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
     };
     write_ipc_message(stdout, &progress)?;
 
-    // Read the WAV file into memory
-    // Clean up temp files
     let _ = std::fs::remove_file(&frames_json_path);
 
-    // Sync backend to ensure all pending GPU operations complete before process exit
     release_backend_allocations::<B>(device)?;
 
     let header = GenerateResponseHeader {
@@ -562,42 +537,13 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
 fn inspect_heartmula_cli(options: &maolan_generate::CliOptions) -> Result<()> {
     let model_paths = resolve_heartmula_model_paths(options.model_dir.as_deref(), options.model)?;
     let _config = load_heartmula_gen_config(&model_paths.gen_config_json)?;
-    let heartmula_summary =
-        summarize_burnpack(&model_paths.heartmula_raw_bpk, heartmula_required_tensors())?;
-    let heartcodec_summary = summarize_burnpack(
+    summarize_burnpack(&model_paths.heartmula_raw_bpk, heartmula_required_tensors())?;
+    summarize_burnpack(
         &model_paths.heartcodec_raw_bpk,
         heartcodec_required_tensors(),
     )?;
-    let runtime_summary = inspect_heartmula_runtime(&model_paths)?;
-    println!("HeartMuLa tensors: {}", heartmula_summary.tensor_count);
-    println!("HeartCodec tensors: {}", heartcodec_summary.tensor_count);
-    println!("text_vocab_size: {}", runtime_summary.text_vocab_size);
-    println!("audio_vocab_size: {}", runtime_summary.audio_vocab_size);
-    println!("hidden_size: {}", runtime_summary.hidden_size);
-    println!(
-        "audio_codebook_count: {}",
-        runtime_summary.audio_codebook_count
-    );
-    println!(
-        "audio_head_vocab_size: {}",
-        runtime_summary.audio_head_vocab_size
-    );
-    println!(
-        "backbone_layer_count: {}",
-        runtime_summary.backbone_layer_count
-    );
-    println!(
-        "decoder_layer_count: {}",
-        runtime_summary.decoder_layer_count
-    );
-    println!(
-        "codec_condition_width: {}",
-        runtime_summary.codec_condition_width
-    );
-    println!(
-        "codec_scalar_decoder_channels: {}",
-        runtime_summary.codec_scalar_decoder_channels
-    );
+    let _runtime_summary = inspect_heartmula_runtime(&model_paths)?;
+
     Ok(())
 }
 
@@ -608,13 +554,10 @@ fn load_heartmula_gen_config(path: &Path) -> Result<HeartmulaGenConfig> {
     .with_context(|| format!("failed to parse {}", path.display()))
 }
 
-fn summarize_burnpack(path: &Path, required_tensors: &[&str]) -> Result<RawBurnpackSummary> {
+fn summarize_burnpack(path: &Path, required_tensors: &[&str]) -> Result<()> {
     let snapshots = load_burnpack_snapshots(path)?;
     ensure_required_tensors_exist(path, &snapshots, required_tensors)?;
-
-    Ok(RawBurnpackSummary {
-        tensor_count: snapshots.len(),
-    })
+    Ok(())
 }
 
 fn load_burnpack_snapshots(path: &Path) -> Result<BTreeMap<String, TensorSnapshot>> {
@@ -719,10 +662,10 @@ fn inspect_heartmula_runtime(model_paths: &HeartmulaModelPaths) -> Result<Heartm
 }
 
 fn infer_heartmula_runtime_summary(
-    heartmula_keys: &[String],
+    _heartmula_keys: &[String],
     heartmula_shapes: &BTreeMap<String, Vec<usize>>,
     _heartcodec_keys: &[String],
-    heartcodec_shapes: &BTreeMap<String, Vec<usize>>,
+    _heartcodec_shapes: &BTreeMap<String, Vec<usize>>,
 ) -> Result<HeartmulaRuntimeSummary> {
     let text_embeddings = expect_rank(
         heartmula_shapes,
@@ -730,44 +673,11 @@ fn infer_heartmula_runtime_summary(
         2,
         "HeartMula text embeddings",
     )?;
-    let audio_embeddings = expect_rank(
-        heartmula_shapes,
-        "audio_embeddings.weight",
-        2,
-        "HeartMula audio embeddings",
-    )?;
     let audio_head = expect_rank(heartmula_shapes, "audio_head", 3, "HeartMula audio head")?;
-    let codec_condition = expect_rank(
-        heartcodec_shapes,
-        "flow_matching.cond_feature_emb.weight",
-        2,
-        "HeartCodec condition embedding",
-    )?;
-    let codec_scalar_decoder = expect_rank(
-        heartcodec_shapes,
-        "scalar_model.decoder.0.bias",
-        1,
-        "HeartCodec scalar decoder bias",
-    )?;
 
     Ok(HeartmulaRuntimeSummary {
         text_vocab_size: text_embeddings[0],
-        audio_vocab_size: audio_embeddings[0],
-        hidden_size: text_embeddings[1],
-        audio_codebook_count: audio_head[0],
         audio_head_vocab_size: audio_head[2],
-        backbone_layer_count: count_numbered_layers(
-            heartmula_keys,
-            "backbone_layers_",
-            "_attn_q_proj_weight",
-        ),
-        decoder_layer_count: count_numbered_layers(
-            heartmula_keys,
-            "decoder_layers_",
-            "_attn_q_proj_weight",
-        ),
-        codec_condition_width: codec_condition[1],
-        codec_scalar_decoder_channels: codec_scalar_decoder[0],
     })
 }
 
@@ -789,18 +699,6 @@ fn expect_rank<'a>(
     }
 
     Ok(shape.as_slice())
-}
-
-fn count_numbered_layers(keys: &[String], prefix: &str, suffix: &str) -> usize {
-    keys.iter()
-        .filter_map(|key| {
-            let rest = key.strip_prefix(prefix)?;
-            let index = rest.strip_suffix(suffix)?;
-            index.parse::<usize>().ok()
-        })
-        .max()
-        .map(|index| index + 1)
-        .unwrap_or(0)
 }
 
 fn heartmula_required_tensors() -> &'static [&'static str] {
@@ -845,9 +743,8 @@ where
     let model_paths = resolve_heartmula_model_paths(options.model_dir.as_deref(), options.model)?;
     let config = load_heartmula_gen_config(&model_paths.gen_config_json)?;
     let runtime_summary = inspect_heartmula_runtime(&model_paths)?;
-    let _heartmula_summary =
-        summarize_burnpack(&model_paths.heartmula_raw_bpk, heartmula_required_tensors())?;
-    let _heartcodec_summary = summarize_burnpack(
+    summarize_burnpack(&model_paths.heartmula_raw_bpk, heartmula_required_tensors())?;
+    summarize_burnpack(
         &model_paths.heartcodec_raw_bpk,
         heartcodec_required_tensors(),
     )?;
@@ -923,10 +820,22 @@ fn run_heartmula_vulkan(options: &maolan_generate::CliOptions) -> Result<()> {
 mod tests {
     use super::{
         HEARTMULA_GEN_CONFIG_REL, HEARTMULA_TOKENIZER_REL, HeartmulaModelPaths,
-        count_numbered_layers, ensure_heartmula_model_paths, heartcodec_raw_bpk_rel,
-        heartmula_raw_bpk_rel, infer_heartmula_runtime_summary, is_vulkan_device_loss_message,
+        ensure_heartmula_model_paths, heartcodec_raw_bpk_rel, heartmula_raw_bpk_rel,
+        infer_heartmula_runtime_summary, is_vulkan_device_loss_message,
         should_forward_ipc_progress,
     };
+
+    fn count_numbered_layers(keys: &[String], prefix: &str, suffix: &str) -> usize {
+        keys.iter()
+            .filter_map(|key| {
+                let rest = key.strip_prefix(prefix)?;
+                let index = rest.strip_suffix(suffix)?;
+                index.parse::<usize>().ok()
+            })
+            .max()
+            .map(|index| index + 1)
+            .unwrap_or(0)
+    }
     use crate::heartmula_runtime::normalize_tags;
     use std::{collections::BTreeMap, env, fs};
 
@@ -1032,14 +941,7 @@ mod tests {
         .expect("summary");
 
         assert_eq!(summary.text_vocab_size, 128_256);
-        assert_eq!(summary.audio_vocab_size, 65_576);
-        assert_eq!(summary.hidden_size, 3_072);
-        assert_eq!(summary.audio_codebook_count, 7);
         assert_eq!(summary.audio_head_vocab_size, 8_197);
-        assert_eq!(summary.backbone_layer_count, 2);
-        assert_eq!(summary.decoder_layer_count, 1);
-        assert_eq!(summary.codec_condition_width, 512);
-        assert_eq!(summary.codec_scalar_decoder_channels, 64);
     }
 
     #[test]

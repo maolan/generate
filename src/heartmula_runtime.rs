@@ -318,8 +318,6 @@ impl<B: Backend> HeartmulaModel<B> {
         )?;
         sync_and_cleanup_backend::<B>(device)?;
 
-        // Process in chunks to avoid GPU timeout
-        // ~12-13 frames = ~1 second of audio
         const CHUNK_SIZE: usize = 12;
         let total_chunks = config.max_audio_frames.div_ceil(CHUNK_SIZE);
 
@@ -328,7 +326,6 @@ impl<B: Backend> HeartmulaModel<B> {
             let chunk_end = ((chunk_idx + 1) * CHUNK_SIZE).min(config.max_audio_frames);
             let frames_in_chunk = chunk_end - chunk_start;
 
-            // Report chunk progress (0-99% for generator phase)
             let progress = (chunk_idx as f32 / total_chunks as f32) * 0.99;
             if let Some(ref mut cb) = config.progress_callback {
                 cb("generator", progress, "Generating audio tokens");
@@ -371,8 +368,6 @@ impl<B: Backend> HeartmulaModel<B> {
                 sync_and_cleanup_backend::<B>(device)?;
             }
 
-            // Sync device after each chunk to prevent GPU timeout
-            // Yield after reclaiming any free transient pages.
             sync_and_cleanup_backend::<B>(device)?;
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
@@ -1055,8 +1050,6 @@ impl<B: Backend> HeartmulaModel<B> {
         let first_token = sample_token(&codebook0_logits, temperature, topk)?;
         frame.push(first_token);
 
-        // Initialize decoder with concatenated [projected_last_hidden, c0_embed]
-        // This matches Python: curr_h = torch.cat([last_h.unsqueeze(1), c0_embed], dim=1)
         let mut decoder_cache = self.decoder.new_cache();
         let c0_embed = self.embed_audio_token(device, 0, first_token);
         let c0_embed = if use_cfg {
@@ -1619,7 +1612,7 @@ pub fn default_tags() -> &'static str {
 
 pub fn normalize_tags(tags: &str) -> String {
     let mut normalized = tags.trim().to_lowercase();
-    // Remove all spaces after commas (handles multiple spaces)
+
     while normalized.contains(", ") {
         normalized = normalized.replace(", ", ",");
     }
@@ -2246,27 +2239,19 @@ fn sample_token<B: Backend>(logits: &Tensor<B, 2>, temperature: f32, topk: usize
     use burn::tensor::Distribution;
     use burn::tensor::activation::softmax;
 
-    // Special case: topk=1 is just argmax (deterministic)
     if topk <= 1 {
         return argmax_token(logits);
     }
 
-    // Step 1: Apply temperature scaling
     let scaled = logits.clone() / temperature;
 
-    // Step 2: Top-k filtering - simplified approach
-    // Get top-k and use only those for sampling
     let vocab_size = scaled.dims()[1];
-    let k = topk.min(vocab_size).max(2); // At least 2 for meaningful sampling
+    let k = topk.min(vocab_size).max(2);
 
-    // Get top-k values and indices in a single call
     let (topk_values, topk_indices) = scaled.clone().topk_with_indices(k, 1);
 
-    // Step 3: Softmax to get probabilities over top-k
     let probs = softmax(topk_values, 1);
 
-    // Step 4: Match Python's _multinomial_sample_one_no_sync:
-    // q = exponential_(1); sample = argmax(probs / q)
     let uniform = Tensor::<B, 2>::random([1, k], Distribution::Uniform(0.0, 1.0), &probs.device())
         .cast(burn::tensor::DType::F32);
     let uniform_data = uniform.to_data();
@@ -2290,7 +2275,6 @@ fn sample_token<B: Backend>(logits: &Tensor<B, 2>, temperature: f32, topk: usize
         }
     }
 
-    // Get the actual token ID from the top-k indices
     let token_data = topk_indices
         .slice([0..1, selected_idx..selected_idx + 1])
         .to_data();
@@ -2406,19 +2390,12 @@ mod tests {
 
         let history = super::build_prompt_history(text_bos_id, text_eos_id, &lyrics_ids, &tags_ids);
 
-        // Tags should be: [BOS, 20, 21, EOS]
-        // Empty separator row
-        // Lyrics should be: [BOS, 10, 11, 12, EOS]
-        // Total: 4 + 1 + 5 = 10 rows
         assert_eq!(history.len(), 10);
 
-        // Check first tag row has BOS
         assert_eq!(history[0][HEARTMULA_AUDIO_CODEBOOKS], text_bos_id);
 
-        // Check empty separator row
         assert!(history[4].iter().all(|&x| x == 0));
 
-        // Check first lyrics row after separator
         assert_eq!(history[5][HEARTMULA_AUDIO_CODEBOOKS], text_bos_id);
     }
 
@@ -2453,25 +2430,23 @@ mod tests {
 
         let row = super::build_audio_history_row(&frame, empty_id);
 
-        // First 8 elements should be the frame tokens
         for i in 0..HEARTMULA_AUDIO_CODEBOOKS {
             assert_eq!(row[i], frame[i] as i64);
         }
-        // The text token position should be empty_id
+
         assert_eq!(row[HEARTMULA_AUDIO_CODEBOOKS], empty_id);
     }
 
     #[test]
     fn build_audio_history_row_with_short_frame() {
-        let frame = vec![100, 200]; // Only 2 tokens
+        let frame = vec![100, 200];
         let empty_id = 999_i64;
 
         let row = super::build_audio_history_row(&frame, empty_id);
 
-        // First 2 elements should be the frame tokens
         assert_eq!(row[0], 100);
         assert_eq!(row[1], 200);
-        // Remaining audio positions should be empty_id
+
         for item in row.iter().take(HEARTMULA_AUDIO_CODEBOOKS).skip(2) {
             assert_eq!(*item, empty_id);
         }
@@ -2572,7 +2547,6 @@ mod tests {
 
         super::write_frames_json(&path, "test lyrics", "test tags", &frames).unwrap();
 
-        // Read and verify the file
         let mut file = std::fs::File::open(&path).unwrap();
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();
@@ -2583,7 +2557,6 @@ mod tests {
         assert!(contents.contains("frame_count"));
         assert!(contents.contains("48000"));
 
-        // Clean up
         std::fs::remove_file(&path).unwrap();
     }
 
@@ -2650,7 +2623,6 @@ mod tests {
         let head_dim = 64;
         let theta = super::scaled_theta(head_dim);
 
-        // Should have head_dim / 2 elements
         assert_eq!(theta.len(), head_dim / 2);
     }
 
@@ -2659,7 +2631,6 @@ mod tests {
         let theta_64 = super::scaled_theta(64);
         let theta_128 = super::scaled_theta(128);
 
-        // Both should have frequencies in decreasing order
         for i in 1..theta_64.len() {
             assert!(theta_64[i] <= theta_64[i - 1]);
         }
@@ -2746,10 +2717,9 @@ mod tests {
         let device = <NdArray<f32> as Backend>::Device::default();
         let model = super::HeartmulaModel::<NdArray<f32>>::new(&device, 1000, 1024);
 
-        // Check that model was created with expected dimensions
         assert_eq!(model.audio_head.dims()[0], HEARTMULA_AUDIO_CODEBOOKS - 1);
         assert_eq!(model.audio_head.dims()[1], HEARTMULA_HIDDEN_SIZE);
-        assert_eq!(model.audio_head.dims()[2], 1024); // audio_vocab_size
+        assert_eq!(model.audio_head.dims()[2], 1024);
     }
 
     #[test]
@@ -2806,19 +2776,15 @@ mod tests {
         let mask = super::causal_mask::<NdArray<f32>>(3, &device);
         let data = mask.to_data().to_vec::<bool>().unwrap();
 
-        // Expected (causal) mask for seq_len=3:
-        // [false, true,  true ]
-        // [false, false, true ]
-        // [false, false, false]
-        assert!(!data[0]); // [0,0]
-        assert!(data[1]); // [0,1]
-        assert!(data[2]); // [0,2]
-        assert!(!data[3]); // [1,0]
-        assert!(!data[4]); // [1,1]
-        assert!(data[5]); // [1,2]
-        assert!(!data[6]); // [2,0]
-        assert!(!data[7]); // [2,1]
-        assert!(!data[8]); // [2,2]
+        assert!(!data[0]);
+        assert!(data[1]);
+        assert!(data[2]);
+        assert!(!data[3]);
+        assert!(!data[4]);
+        assert!(data[5]);
+        assert!(!data[6]);
+        assert!(!data[7]);
+        assert!(!data[8]);
     }
 
     #[test]
@@ -2844,7 +2810,7 @@ mod tests {
         let positions = vec![0, 1, 2, 3, 4];
         let cache = super::scaled_rope_cache::<NdArray<f32>>(&device, &positions, 64);
 
-        assert_eq!(cache.dims(), [5, 32, 2]); // [seq_len, head_dim/2, 2]
+        assert_eq!(cache.dims(), [5, 32, 2]);
     }
 
     #[test]

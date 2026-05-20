@@ -1,4 +1,4 @@
-// Generated from ONNX "stable_audio_vae_decoder_sim.onnx" by burn-onnx
+
 use burn::prelude::*;
 use burn::nn::PaddingConfig1d;
 use burn::nn::conv::Conv1d;

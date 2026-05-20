@@ -111,8 +111,8 @@ pub struct GenerateError {
 /// Progress update message sent during generation
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct GenerateProgress {
-    pub phase: String, // "generator" or "decoder"
-    pub progress: f32, // 0.0 to 1.0 within the phase
+    pub phase: String,
+    pub progress: f32,
     pub operation: String,
 }
 
@@ -1103,9 +1103,6 @@ mod tests {
 
     #[test]
     fn stderr_logging_disabled_in_ipc_mode() {
-        // When IPC_MODE_ENV is set, stderr_logging_enabled should return false
-        // Note: We can't actually set the env var here without affecting other tests,
-        // but we can verify the function exists and has the right signature
         let _ = super::stderr_logging_enabled();
     }
 
@@ -1194,7 +1191,6 @@ mod tests {
         let mut buffer = Vec::new();
         write_ipc_bytes(&mut buffer, original).expect("write should succeed");
 
-        // Read back the bytes
         let mut cursor = Cursor::new(buffer);
         let mut len_bytes = [0_u8; 8];
         std::io::Read::read_exact(&mut cursor, &mut len_bytes).expect("read length should succeed");
@@ -1211,7 +1207,6 @@ mod tests {
         use super::read_ipc_message;
         use std::io::Cursor;
 
-        // Create a buffer with just the length header but no payload
         let len_bytes = 100_u64.to_le_bytes();
         let buffer = len_bytes.to_vec();
 
@@ -1225,7 +1220,6 @@ mod tests {
         use super::read_ipc_message;
         use std::io::Cursor;
 
-        // Create a buffer with length header and invalid JSON payload
         let payload = b"not valid json";
         let len_bytes = (payload.len() as u64).to_le_bytes();
         let mut buffer = Vec::new();
@@ -1295,14 +1289,12 @@ mod tests {
 
     #[test]
     fn deserialize_generate_request_with_aliases() {
-        // Test "seconds_total" alias for length
         let json1 =
             r#"{"prompt": "test", "backend": "cpu", "cfg_scale": 1.5, "seconds_total": 5000}"#;
         let request1: super::GenerateRequest =
             serde_json::from_str(json1).expect("deserialization should succeed");
         assert_eq!(request1.length, 5000);
 
-        // Test "max_audio_length_ms" alias for length
         let json2 = r#"{"prompt": "test", "backend": "cpu", "cfg_scale": 1.5, "max_audio_length_ms": 7000}"#;
         let request2: super::GenerateRequest =
             serde_json::from_str(json2).expect("deserialization should succeed");

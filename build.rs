@@ -4,12 +4,9 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() -> Result<()> {
-    println!("cargo:rerun-if-changed=build.rs");
-
     let source_dir = resolve_generated_source_dir()?;
     let out_dir = PathBuf::from(env::var("OUT_DIR").context("OUT_DIR is not set")?);
 
-    // No stable audio models - HeartMula is handled separately
     let bindings = format!(
         "pub const GENERATED_SOURCE_DIR: &str = {generated_source_dir:?};\n",
         generated_source_dir = source_dir.display().to_string(),

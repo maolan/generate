@@ -1,4 +1,4 @@
-// Generated from ONNX "stable_audio_t5_sim.onnx" by burn-onnx
+
 use burn::prelude::*;
 use burn::nn::Linear;
 use burn::nn::LinearConfig;
