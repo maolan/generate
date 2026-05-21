@@ -21,9 +21,9 @@ default = []
 
 [dependencies]
 anyhow = "1.0.100"
-burn = { version = "0.21.0-pre.1", default-features = false, features = ["std", "ndarray", "wgpu"] }
-burn-ndarray = { version = "0.21.0-pre.1", default-features = false, features = ["multi-threads", "std"] }
-burn-store = { version = "0.21.0-pre.1", default-features = false, features = ["burnpack", "std", "memmap"] }
+burn = { version = "0.21.0", default-features = false, features = ["std", "ndarray", "wgpu"] }
+burn-ndarray = { version = "0.21.0", default-features = false, features = ["multi-threads", "std"] }
+burn-store = { version = "0.21.0", default-features = false, features = ["burnpack", "std", "memmap"] }
 half = "2.7.1"
 huggingface-hub = { package = "hf-hub", version = "0.5.0", default-features = false, features = ["ureq"] }
 hound = "3.5.1"

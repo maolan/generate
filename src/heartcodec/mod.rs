@@ -200,7 +200,7 @@ impl<B: Backend> HeartCodecModel<B> {
                 if snap.full_path() == name {
                     let data = snap.to_data().ok()?;
                     if data.dtype == DType::F32 {
-                        let shape = data.shape.clone();
+                        let shape = data.shape.to_vec();
                         let values: Vec<f32> = data.to_vec::<f32>().ok()?;
                         Some((values, shape))
                     } else {
@@ -243,7 +243,7 @@ impl<B: Backend> HeartCodecModel<B> {
                     if snap.full_path() == name {
                         let data = snap.to_data().ok()?;
                         if data.dtype == DType::F32 {
-                            let shape = data.shape.clone();
+                            let shape = data.shape.to_vec();
                             let values: Vec<f32> = data.to_vec::<f32>().ok()?;
                             Some((values, shape))
                         } else {
@@ -1862,7 +1862,7 @@ impl<B: Backend> ProjectLayer<B> {
                     kernel_size,
                     dilation: 1,
                     groups: 1,
-                    padding: burn::module::Ignored(PaddingConfig1d::Explicit(padding, padding)),
+                    padding: PaddingConfig1d::Explicit(padding, padding),
                 }
             } else {
                 Conv1dConfig::new(in_channels, out_channels, kernel_size)

@@ -611,7 +611,7 @@ fn load_selected_tensor_shapes(
                 path.display()
             )
         })?;
-        shapes.insert((*tensor_name).to_string(), data.shape);
+        shapes.insert((*tensor_name).to_string(), data.shape.to_vec());
     }
 
     Ok(shapes)

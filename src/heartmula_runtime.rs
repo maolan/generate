@@ -1,8 +1,8 @@
 use crate::heartcodec::frames_to_tensor;
 use anyhow::{Context, Result, anyhow};
 use burn::module::{
-    AutodiffModule, ConstantRecord, Content, Devices, Ignored, Module, ModuleDisplay,
-    ModuleDisplayDefault, ModuleMapper, ModuleVisitor, Param, ParamId,
+    AutodiffModule, Content, Devices, EmptyRecord, Module, ModuleDisplay, ModuleDisplayDefault,
+    ModuleMapper, ModuleVisitor, Param, ParamId,
 };
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout};
 use burn::prelude::Backend;
@@ -207,7 +207,7 @@ pub struct HeartmulaAttention<B: Backend> {
     pub v_proj: Linear<B>,
     pub output_proj: Linear<B>,
     #[module(skip)]
-    meta: Ignored<AttentionMeta>,
+    meta: AttentionMeta,
 }
 
 #[derive(Module, Debug)]
@@ -426,25 +426,25 @@ impl<B: Backend> HeartmulaModel<B> {
         let mut layer0_q = layer0.attn.q_proj.forward(layer0_hidden.clone()).reshape([
             batch,
             seq_len,
-            layer0.attn.meta.0.num_heads,
-            layer0.attn.meta.0.head_dim,
+            layer0.attn.meta.num_heads,
+            layer0.attn.meta.head_dim,
         ]);
         let mut layer0_k = layer0.attn.k_proj.forward(layer0_hidden.clone()).reshape([
             batch,
             seq_len,
-            layer0.attn.meta.0.num_kv_heads,
-            layer0.attn.meta.0.head_dim,
+            layer0.attn.meta.num_kv_heads,
+            layer0.attn.meta.head_dim,
         ]);
         let mut layer0_v = layer0.attn.v_proj.forward(layer0_hidden.clone()).reshape([
             batch,
             seq_len,
-            layer0.attn.meta.0.num_kv_heads,
-            layer0.attn.meta.0.head_dim,
+            layer0.attn.meta.num_kv_heads,
+            layer0.attn.meta.head_dim,
         ]);
         layer0_q = apply_scaled_rope(layer0_q, &positions);
         layer0_k = apply_scaled_rope(layer0_k, &positions);
-        if layer0.attn.meta.0.num_heads != layer0.attn.meta.0.num_kv_heads {
-            let repeats = layer0.attn.meta.0.num_heads / layer0.attn.meta.0.num_kv_heads;
+        if layer0.attn.meta.num_heads != layer0.attn.meta.num_kv_heads {
+            let repeats = layer0.attn.meta.num_heads / layer0.attn.meta.num_kv_heads;
             layer0_k = repeat_kv_heads(layer0_k, repeats);
             layer0_v = repeat_kv_heads(layer0_v, repeats);
         }
@@ -524,8 +524,8 @@ impl<B: Backend> HeartmulaModel<B> {
             .reshape([
                 second_batch,
                 second_seq_len,
-                second_layer0.attn.meta.0.num_heads,
-                second_layer0.attn.meta.0.head_dim,
+                second_layer0.attn.meta.num_heads,
+                second_layer0.attn.meta.head_dim,
             ]);
         let mut second_layer0_k_unrepeated = second_layer0
             .attn
@@ -534,8 +534,8 @@ impl<B: Backend> HeartmulaModel<B> {
             .reshape([
                 second_batch,
                 second_seq_len,
-                second_layer0.attn.meta.0.num_kv_heads,
-                second_layer0.attn.meta.0.head_dim,
+                second_layer0.attn.meta.num_kv_heads,
+                second_layer0.attn.meta.head_dim,
             ]);
         let second_layer0_v_unrepeated = second_layer0
             .attn
@@ -544,8 +544,8 @@ impl<B: Backend> HeartmulaModel<B> {
             .reshape([
                 second_batch,
                 second_seq_len,
-                second_layer0.attn.meta.0.num_kv_heads,
-                second_layer0.attn.meta.0.head_dim,
+                second_layer0.attn.meta.num_kv_heads,
+                second_layer0.attn.meta.head_dim,
             ]);
         let second_position_tensor = single_position_tensor::<B>(next_position, device);
         second_layer0_q = apply_scaled_rope(second_layer0_q, &second_position_tensor);
@@ -553,9 +553,8 @@ impl<B: Backend> HeartmulaModel<B> {
             apply_scaled_rope(second_layer0_k_unrepeated, &second_position_tensor);
         let mut second_layer0_k = second_layer0_k_unrepeated.clone();
         let mut second_layer0_v = second_layer0_v_unrepeated.clone();
-        if second_layer0.attn.meta.0.num_heads != second_layer0.attn.meta.0.num_kv_heads {
-            let repeats =
-                second_layer0.attn.meta.0.num_heads / second_layer0.attn.meta.0.num_kv_heads;
+        if second_layer0.attn.meta.num_heads != second_layer0.attn.meta.num_kv_heads {
+            let repeats = second_layer0.attn.meta.num_heads / second_layer0.attn.meta.num_kv_heads;
             second_layer0_k = repeat_kv_heads(second_layer0_k, repeats);
             second_layer0_v = repeat_kv_heads(second_layer0_v, repeats);
         }
@@ -570,26 +569,26 @@ impl<B: Backend> HeartmulaModel<B> {
             vec![prefill_v.clone(), second_layer0_v_unrepeated.clone()],
             2,
         );
-        let second_full_k =
-            if second_layer0.attn.meta.0.num_heads != second_layer0.attn.meta.0.num_kv_heads {
-                let repeats =
-                    second_layer0.attn.meta.0.num_heads / second_layer0.attn.meta.0.num_kv_heads;
-                repeat_cached_kv_heads(second_full_k_unrepeated.clone(), repeats)
-            } else {
-                second_full_k_unrepeated.clone()
-            };
-        let second_full_v =
-            if second_layer0.attn.meta.0.num_heads != second_layer0.attn.meta.0.num_kv_heads {
-                let repeats =
-                    second_layer0.attn.meta.0.num_heads / second_layer0.attn.meta.0.num_kv_heads;
-                repeat_cached_kv_heads(second_full_v_unrepeated.clone(), repeats)
-            } else {
-                second_full_v_unrepeated.clone()
-            };
+        let second_full_k = if second_layer0.attn.meta.num_heads
+            != second_layer0.attn.meta.num_kv_heads
+        {
+            let repeats = second_layer0.attn.meta.num_heads / second_layer0.attn.meta.num_kv_heads;
+            repeat_cached_kv_heads(second_full_k_unrepeated.clone(), repeats)
+        } else {
+            second_full_k_unrepeated.clone()
+        };
+        let second_full_v = if second_layer0.attn.meta.num_heads
+            != second_layer0.attn.meta.num_kv_heads
+        {
+            let repeats = second_layer0.attn.meta.num_heads / second_layer0.attn.meta.num_kv_heads;
+            repeat_cached_kv_heads(second_full_v_unrepeated.clone(), repeats)
+        } else {
+            second_full_v_unrepeated.clone()
+        };
         let second_scores = second_layer0_q_swapped
             .clone()
             .matmul(second_full_k.clone().swap_dims(2, 3))
-            .mul_scalar(1.0 / (second_layer0.attn.meta.0.head_dim as f32).sqrt());
+            .mul_scalar(1.0 / (second_layer0.attn.meta.head_dim as f32).sqrt());
         let second_weights = softmax(second_scores, 3);
         let second_attn_out = second_layer0.attn.output_proj.forward(
             second_weights
@@ -698,28 +697,28 @@ impl<B: Backend> HeartmulaModel<B> {
                 let mut q = layer0.attn.q_proj.forward(layer0_hidden.clone()).reshape([
                     batch,
                     seq_len,
-                    layer0.attn.meta.0.num_heads,
-                    layer0.attn.meta.0.head_dim,
+                    layer0.attn.meta.num_heads,
+                    layer0.attn.meta.head_dim,
                 ]);
                 let mut k_unrepeated = layer0.attn.k_proj.forward(layer0_hidden.clone()).reshape([
                     batch,
                     seq_len,
-                    layer0.attn.meta.0.num_kv_heads,
-                    layer0.attn.meta.0.head_dim,
+                    layer0.attn.meta.num_kv_heads,
+                    layer0.attn.meta.head_dim,
                 ]);
                 let v_unrepeated = layer0.attn.v_proj.forward(layer0_hidden.clone()).reshape([
                     batch,
                     seq_len,
-                    layer0.attn.meta.0.num_kv_heads,
-                    layer0.attn.meta.0.head_dim,
+                    layer0.attn.meta.num_kv_heads,
+                    layer0.attn.meta.head_dim,
                 ]);
                 let pos = single_position_tensor::<B>(second_next_decoder_pos, device);
                 q = apply_scaled_rope(q, &pos);
                 k_unrepeated = apply_scaled_rope(k_unrepeated, &pos);
                 let mut k = k_unrepeated.clone();
                 let mut v = v_unrepeated.clone();
-                if layer0.attn.meta.0.num_heads != layer0.attn.meta.0.num_kv_heads {
-                    let repeats = layer0.attn.meta.0.num_heads / layer0.attn.meta.0.num_kv_heads;
+                if layer0.attn.meta.num_heads != layer0.attn.meta.num_kv_heads {
+                    let repeats = layer0.attn.meta.num_heads / layer0.attn.meta.num_kv_heads;
                     k = repeat_kv_heads(k, repeats);
                     v = repeat_kv_heads(v, repeats);
                 }
@@ -740,14 +739,14 @@ impl<B: Backend> HeartmulaModel<B> {
                     .ok_or_else(|| anyhow!("missing decoder layer 0 value cache"))?;
                 let full_k_unrepeated = Tensor::cat(vec![prev_k, k_unrepeated.clone()], 2);
                 let full_v_unrepeated = Tensor::cat(vec![prev_v, v_unrepeated.clone()], 2);
-                let full_k = if layer0.attn.meta.0.num_heads != layer0.attn.meta.0.num_kv_heads {
-                    let repeats = layer0.attn.meta.0.num_heads / layer0.attn.meta.0.num_kv_heads;
+                let full_k = if layer0.attn.meta.num_heads != layer0.attn.meta.num_kv_heads {
+                    let repeats = layer0.attn.meta.num_heads / layer0.attn.meta.num_kv_heads;
                     repeat_cached_kv_heads(full_k_unrepeated, repeats)
                 } else {
                     full_k_unrepeated
                 };
-                let full_v = if layer0.attn.meta.0.num_heads != layer0.attn.meta.0.num_kv_heads {
-                    let repeats = layer0.attn.meta.0.num_heads / layer0.attn.meta.0.num_kv_heads;
+                let full_v = if layer0.attn.meta.num_heads != layer0.attn.meta.num_kv_heads {
+                    let repeats = layer0.attn.meta.num_heads / layer0.attn.meta.num_kv_heads;
                     repeat_cached_kv_heads(full_v_unrepeated, repeats)
                 } else {
                     full_v_unrepeated
@@ -1262,7 +1261,7 @@ impl<B: Backend> SplitAudioEmbeddings<B> {
 }
 
 impl<B: Backend> Module<B> for SplitAudioEmbeddings<B> {
-    type Record = ConstantRecord;
+    type Record = EmptyRecord;
 
     fn visit<V: ModuleVisitor<B>>(&self, _visitor: &mut V) {}
 
@@ -1275,7 +1274,7 @@ impl<B: Backend> Module<B> for SplitAudioEmbeddings<B> {
     }
 
     fn into_record(self) -> Self::Record {
-        ConstantRecord::new()
+        EmptyRecord::new()
     }
 
     fn to_device(self, device: &B::Device) -> Self {
@@ -1428,11 +1427,11 @@ impl<B: Backend> HeartmulaAttention<B> {
             k_proj: linear_no_bias(device, HEARTMULA_HIDDEN_SIZE, num_kv_heads * head_dim),
             v_proj: linear_no_bias(device, HEARTMULA_HIDDEN_SIZE, num_kv_heads * head_dim),
             output_proj: linear_no_bias(device, HEARTMULA_HIDDEN_SIZE, HEARTMULA_HIDDEN_SIZE),
-            meta: Ignored(AttentionMeta {
+            meta: AttentionMeta {
                 num_heads,
                 num_kv_heads,
                 head_dim,
-            }),
+            },
         }
     }
 
@@ -1446,20 +1445,20 @@ impl<B: Backend> HeartmulaAttention<B> {
         let q = self.q_proj.forward(hidden.clone()).reshape([
             batch,
             seq_len,
-            self.meta.0.num_heads,
-            self.meta.0.head_dim,
+            self.meta.num_heads,
+            self.meta.head_dim,
         ]);
         let k = self.k_proj.forward(hidden.clone()).reshape([
             batch,
             seq_len,
-            self.meta.0.num_kv_heads,
-            self.meta.0.head_dim,
+            self.meta.num_kv_heads,
+            self.meta.head_dim,
         ]);
         let v = self.v_proj.forward(hidden).reshape([
             batch,
             seq_len,
-            self.meta.0.num_kv_heads,
-            self.meta.0.head_dim,
+            self.meta.num_kv_heads,
+            self.meta.head_dim,
         ]);
 
         let q = apply_scaled_rope(q, &position).swap_dims(1, 2);
@@ -1479,20 +1478,19 @@ impl<B: Backend> HeartmulaAttention<B> {
         cache.key = Some(full_k.clone());
         cache.value = Some(full_v.clone());
 
-        let (full_k_for_attn, full_v_for_attn) =
-            if self.meta.0.num_heads != self.meta.0.num_kv_heads {
-                let repeats = self.meta.0.num_heads / self.meta.0.num_kv_heads;
-                (
-                    repeat_cached_kv_heads(full_k, repeats),
-                    repeat_cached_kv_heads(full_v, repeats),
-                )
-            } else {
-                (full_k, full_v)
-            };
+        let (full_k_for_attn, full_v_for_attn) = if self.meta.num_heads != self.meta.num_kv_heads {
+            let repeats = self.meta.num_heads / self.meta.num_kv_heads;
+            (
+                repeat_cached_kv_heads(full_k, repeats),
+                repeat_cached_kv_heads(full_v, repeats),
+            )
+        } else {
+            (full_k, full_v)
+        };
 
         let weights = softmax(
             q.matmul(full_k_for_attn.swap_dims(2, 3))
-                .mul_scalar(1.0 / (self.meta.0.head_dim as f32).sqrt()),
+                .mul_scalar(1.0 / (self.meta.head_dim as f32).sqrt()),
             3,
         );
         let attended = weights.matmul(full_v_for_attn).swap_dims(1, 2).reshape([
@@ -1513,20 +1511,20 @@ impl<B: Backend> HeartmulaAttention<B> {
         let q = self.q_proj.forward(hidden.clone()).reshape([
             batch,
             seq_len,
-            self.meta.0.num_heads,
-            self.meta.0.head_dim,
+            self.meta.num_heads,
+            self.meta.head_dim,
         ]);
         let k = self.k_proj.forward(hidden.clone()).reshape([
             batch,
             seq_len,
-            self.meta.0.num_kv_heads,
-            self.meta.0.head_dim,
+            self.meta.num_kv_heads,
+            self.meta.head_dim,
         ]);
         let v = self.v_proj.forward(hidden).reshape([
             batch,
             seq_len,
-            self.meta.0.num_kv_heads,
-            self.meta.0.head_dim,
+            self.meta.num_kv_heads,
+            self.meta.head_dim,
         ]);
 
         let q = apply_scaled_rope(q, &positions).swap_dims(1, 2);
@@ -1535,8 +1533,8 @@ impl<B: Backend> HeartmulaAttention<B> {
         cache.key = Some(k.clone());
         cache.value = Some(v.clone());
 
-        let (k_for_attn, v_for_attn) = if self.meta.0.num_heads != self.meta.0.num_kv_heads {
-            let repeats = self.meta.0.num_heads / self.meta.0.num_kv_heads;
+        let (k_for_attn, v_for_attn) = if self.meta.num_heads != self.meta.num_kv_heads {
+            let repeats = self.meta.num_heads / self.meta.num_kv_heads;
             (
                 repeat_cached_kv_heads(k, repeats),
                 repeat_cached_kv_heads(v, repeats),
@@ -1547,7 +1545,7 @@ impl<B: Backend> HeartmulaAttention<B> {
 
         let scores = q
             .matmul(k_for_attn.clone().swap_dims(2, 3))
-            .mul_scalar(1.0 / (self.meta.0.head_dim as f32).sqrt());
+            .mul_scalar(1.0 / (self.meta.head_dim as f32).sqrt());
         let mask = causal_mask::<B>(seq_len, &scores.device());
         let weights = softmax(scores.mask_fill(mask, -1.0e9), 3);
         let attended = weights.matmul(v_for_attn).swap_dims(1, 2).reshape([
@@ -2677,8 +2675,8 @@ mod tests {
             HEARTMULA_BACKBONE_KV_HEADS,
         );
 
-        assert_eq!(attn.meta.0.num_heads, HEARTMULA_BACKBONE_HEADS);
-        assert_eq!(attn.meta.0.num_kv_heads, HEARTMULA_BACKBONE_KV_HEADS);
+        assert_eq!(attn.meta.num_heads, HEARTMULA_BACKBONE_HEADS);
+        assert_eq!(attn.meta.num_kv_heads, HEARTMULA_BACKBONE_KV_HEADS);
     }
 
     #[test]
@@ -2692,7 +2690,7 @@ mod tests {
             HEARTMULA_BACKBONE_KV_HEADS,
         );
 
-        assert_eq!(layer.attn.meta.0.num_heads, HEARTMULA_BACKBONE_HEADS);
+        assert_eq!(layer.attn.meta.num_heads, HEARTMULA_BACKBONE_HEADS);
     }
 
     #[test]
