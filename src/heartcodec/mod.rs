@@ -2840,7 +2840,7 @@ mod tests {
     #[test]
     fn frames_to_tensor_converts_correctly() {
         use burn::backend::ndarray::NdArray;
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let frames: Vec<Vec<i64>> = vec![
             vec![1, 2, 3, 4, 5, 6, 7, 8],
             vec![9, 10, 11, 12, 13, 14, 15, 16],
@@ -2858,7 +2858,7 @@ mod tests {
     fn frames_to_tensor_empty_frames() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let frames: Vec<Vec<i64>> = vec![];
 
         let tensor = super::frames_to_tensor::<NdArray<f32>>(&frames, &device);
@@ -2873,7 +2873,7 @@ mod tests {
     fn frames_to_tensor_rejects_inconsistent_codebooks() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let frames: Vec<Vec<i64>> = vec![vec![1, 2, 3, 4, 5, 6, 7, 8], vec![9, 10, 11]];
 
         let _tensor = super::frames_to_tensor::<NdArray<f32>>(&frames, &device);
@@ -2883,7 +2883,7 @@ mod tests {
     fn prelu_activation_forward() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let prelu = super::PReLU::<NdArray<f32>>::new(&device);
 
         let input = Tensor::<NdArray<f32>, 3>::from_data(
@@ -2901,7 +2901,7 @@ mod tests {
     fn prelu_activation_negative_values() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let prelu = super::PReLU::<NdArray<f32>>::new(&device);
 
         let input = Tensor::<NdArray<f32>, 3>::from_data(
@@ -2929,7 +2929,7 @@ mod tests {
     fn rms_norm_forward_preserves_shape() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let rms_norm = super::RmsNorm::<NdArray<f32>>::new(&device, 16, 1e-6);
 
         let input = Tensor::<NdArray<f32>, 3>::from_data(
@@ -2944,7 +2944,7 @@ mod tests {
     fn heartcodec_model_new_creates_valid_model() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let config = super::HeartCodecConfig::default();
         let model = super::HeartCodecModel::<NdArray<f32>>::new(&device);
 
@@ -2956,7 +2956,7 @@ mod tests {
     fn heartcodec_model_with_ode_steps() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let model = super::HeartCodecModel::<NdArray<f32>>::new(&device).with_ode_steps(20);
 
         assert_eq!(model.ode_steps, 20);
@@ -2966,7 +2966,7 @@ mod tests {
     fn heartcodec_model_with_guidance_scale() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let model = super::HeartCodecModel::<NdArray<f32>>::new(&device).with_guidance_scale(2.5);
 
         assert_eq!(model.guidance_scale, 2.5);
@@ -2976,7 +2976,7 @@ mod tests {
     fn heartcodec_model_clamps_ode_steps() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
 
         let model_high = super::HeartCodecModel::<NdArray<f32>>::new(&device).with_ode_steps(100);
         assert_eq!(model_high.ode_steps, 50);
@@ -2989,7 +2989,7 @@ mod tests {
     fn residual_unit_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let unit = super::ResidualUnit::<NdArray<f32>>::new(&device, 128, 3);
 
         assert_eq!(unit.conv1.dilation, 3);
@@ -3000,7 +3000,7 @@ mod tests {
     fn resdecoder_block_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let block = super::ResDecoderBlock::<NdArray<f32>>::new(&device, 2048, 1024);
 
         assert_eq!(block.up_conv.stride, 5);
@@ -3011,7 +3011,7 @@ mod tests {
     fn resdecoder_block_kernel_stride_pairs() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
 
         let test_cases = [
             ((2048, 1024), (10, 5)),
@@ -3036,7 +3036,7 @@ mod tests {
     fn project_layer_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let proj = super::ProjectLayer::<NdArray<f32>>::new(&device, 512, 256, 3);
 
         assert_eq!(proj.kernel_size, 3);
@@ -3047,7 +3047,7 @@ mod tests {
     fn scalar_model_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let config = super::HeartCodecConfig::default();
         let model = super::ScalarModel::<NdArray<f32>>::new(&device, &config);
 
@@ -3059,7 +3059,7 @@ mod tests {
     fn interpolate_1d_scale_factor_1() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let input = Tensor::<NdArray<f32>, 3>::from_data(
             TensorData::new(vec![1.0, 2.0, 3.0, 4.0], [1, 2, 2]),
             &device,
@@ -3073,7 +3073,7 @@ mod tests {
     fn interpolate_1d_scale_factor_2() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let input = Tensor::<NdArray<f32>, 3>::from_data(
             TensorData::new(vec![1.0, 2.0], [1, 1, 2]),
             &device,
@@ -3118,7 +3118,7 @@ mod tests {
     fn transformer_block_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let block = super::TransformerBlock::<NdArray<f32>>::new(&device, 512, 8, 64);
 
         assert_eq!(block.attn.num_heads, 8);
@@ -3129,7 +3129,7 @@ mod tests {
     fn attention_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let attn = super::Attention::<NdArray<f32>>::new(&device, 512, 8, 64);
 
         assert_eq!(attn.num_heads, 8);
@@ -3141,7 +3141,7 @@ mod tests {
     fn llama_transformer_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let config = super::HeartCodecConfig::default();
         let transformer = super::LlamaTransformer::<NdArray<f32>>::new(&device, &config);
 
@@ -3153,7 +3153,7 @@ mod tests {
     fn adalayer_norm_single_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let adaln = super::AdaLayerNormSingle::<NdArray<f32>>::new(&device, 512);
 
         let (output, embedded) = adaln.forward(0.5, burn::tensor::DType::F32);
@@ -3165,7 +3165,7 @@ mod tests {
     fn timestep_embedding_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let emb = super::TimestepEmbedding::<NdArray<f32>>::new(&device, 128, 512);
 
         let input = Tensor::<NdArray<f32>, 2>::zeros([1, 128], &device);
@@ -3177,7 +3177,7 @@ mod tests {
     fn pixart_alpha_combined_flow_embeddings() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let emb = super::PixArtAlphaCombinedFlowEmbeddings::<NdArray<f32>>::new(&device, 512);
 
         let output = emb.forward(0.5, burn::tensor::DType::F32);
@@ -3188,7 +3188,7 @@ mod tests {
     fn vq_codebook_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let codebook = super::VQCodebook::<NdArray<f32>>::new(&device, 1024, 64);
 
         assert_eq!(codebook._codebook.embed.val().dims()[0], 1);
@@ -3200,7 +3200,7 @@ mod tests {
     fn residual_vq_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as burn::prelude::Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let config = super::HeartCodecConfig::default();
         let rvq = super::ResidualVQ::<NdArray<f32>>::new(&device, &config);
 

@@ -2454,7 +2454,7 @@ mod tests {
     fn single_position_tensor() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let tensor = super::single_position_tensor::<NdArray<f32>>(42, &device);
 
         assert_eq!(tensor.dims(), [1, 1]);
@@ -2466,7 +2466,7 @@ mod tests {
     fn position_tensor() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let positions = vec![0, 1, 2, 3, 4];
         let tensor = super::position_tensor::<NdArray<f32>>(positions, &device);
 
@@ -2479,7 +2479,7 @@ mod tests {
     fn repeat_kv_heads() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let tensor = Tensor::<NdArray<f32>, 4>::from_data(
             TensorData::new(vec![1.0; 32], [1, 2, 4, 4]),
             &device,
@@ -2493,7 +2493,7 @@ mod tests {
     fn repeat_cached_kv_heads() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let tensor = Tensor::<NdArray<f32>, 4>::from_data(
             TensorData::new(vec![1.0; 32], [1, 4, 2, 4]),
             &device,
@@ -2507,7 +2507,7 @@ mod tests {
     fn take_last_token() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let tensor = Tensor::<NdArray<f32>, 3>::from_data(
             TensorData::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [1, 3, 2]),
             &device,
@@ -2521,7 +2521,7 @@ mod tests {
     fn tensor_to_f32_vec_success() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let tensor = Tensor::<NdArray<f32>, 2>::from_data(
             TensorData::new(vec![1.0, 2.0, 3.0, 4.0], [2, 2]),
             &device,
@@ -2642,7 +2642,7 @@ mod tests {
     fn heartmula_rms_norm_forward() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let norm = super::HeartmulaRmsNorm::<NdArray<f32>>::new(&device, 64, 1e-5);
 
         let input = Tensor::<NdArray<f32>, 3>::ones([1, 4, 64], &device);
@@ -2655,7 +2655,7 @@ mod tests {
     fn heartmula_mlp_forward() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let mlp = super::HeartmulaMlp::<NdArray<f32>>::new(&device);
 
         let input = Tensor::<NdArray<f32>, 3>::ones([1, 4, HEARTMULA_HIDDEN_SIZE], &device);
@@ -2668,7 +2668,7 @@ mod tests {
     fn heartmula_attention_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let attn = super::HeartmulaAttention::<NdArray<f32>>::new(
             &device,
             HEARTMULA_BACKBONE_HEADS,
@@ -2683,7 +2683,7 @@ mod tests {
     fn heartmula_transformer_layer_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let layer = super::HeartmulaTransformerLayer::<NdArray<f32>>::new(
             &device,
             HEARTMULA_BACKBONE_HEADS,
@@ -2697,7 +2697,7 @@ mod tests {
     fn heartmula_transformer_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let transformer = super::HeartmulaTransformer::<NdArray<f32>>::new(
             &device,
             HEARTMULA_BACKBONE_LAYERS,
@@ -2712,7 +2712,7 @@ mod tests {
     fn heartmula_model_new() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let model = super::HeartmulaModel::<NdArray<f32>>::new(&device, 1000, 1024);
 
         assert_eq!(model.audio_head.dims()[0], HEARTMULA_AUDIO_CODEBOOKS - 1);
@@ -2724,7 +2724,7 @@ mod tests {
     fn heartmula_model_audio_vocab_size() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let model = super::HeartmulaModel::<NdArray<f32>>::new(&device, 1000, 1024);
 
         assert_eq!(model.audio_vocab_size(), 1024);
@@ -2734,7 +2734,7 @@ mod tests {
     fn history_tokens_tensor_shape() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let history: Vec<[i64; HEARTMULA_PARALLEL_TOKENS]> = vec![
             [1, 2, 3, 4, 5, 6, 7, 8, 100],
             [9, 10, 11, 12, 13, 14, 15, 16, 101],
@@ -2748,7 +2748,7 @@ mod tests {
     fn history_mask_tensor_shape() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let history: Vec<[i64; HEARTMULA_PARALLEL_TOKENS]> =
             vec![[1, 2, 3, 4, 5, 6, 7, 8, 100], [0, 0, 0, 0, 0, 0, 0, 0, 101]];
 
@@ -2760,7 +2760,7 @@ mod tests {
     fn causal_mask_shape() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let mask = super::causal_mask::<NdArray<f32>>(5, &device);
 
         assert_eq!(mask.dims(), [1, 1, 5, 5]);
@@ -2770,7 +2770,7 @@ mod tests {
     fn causal_mask_values() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let mask = super::causal_mask::<NdArray<f32>>(3, &device);
         let data = mask.to_data().to_vec::<bool>().unwrap();
 
@@ -2789,7 +2789,7 @@ mod tests {
     fn apply_scaled_rope_preserves_shape() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let tensor = Tensor::<NdArray<f32>, 4>::ones([1, 4, 8, 64], &device);
         let positions = Tensor::<NdArray<f32>, 2, Int>::from_data(
             TensorData::new(vec![0, 1, 2, 3], [1, 4]),
@@ -2804,7 +2804,7 @@ mod tests {
     fn scaled_rope_cache_shape() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let positions = vec![0, 1, 2, 3, 4];
         let cache = super::scaled_rope_cache::<NdArray<f32>>(&device, &positions, 64);
 
@@ -2815,7 +2815,7 @@ mod tests {
     fn splice_sequence_token_middle() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let hidden = Tensor::<NdArray<f32>, 3>::from_data(
             TensorData::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [1, 3, 2]),
             &device,
@@ -2833,7 +2833,7 @@ mod tests {
     fn splice_sequence_token_at_start() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let hidden = Tensor::<NdArray<f32>, 3>::from_data(
             TensorData::new(vec![1.0, 2.0, 3.0, 4.0], [1, 2, 2]),
             &device,
@@ -2851,7 +2851,7 @@ mod tests {
     fn splice_sequence_token_at_end() {
         use burn::backend::ndarray::NdArray;
 
-        let device = <NdArray<f32> as Backend>::Device::default();
+        let device = burn::prelude::Device::<NdArray<f32>>::default();
         let hidden = Tensor::<NdArray<f32>, 3>::from_data(
             TensorData::new(vec![1.0, 2.0, 3.0, 4.0], [1, 2, 2]),
             &device,
