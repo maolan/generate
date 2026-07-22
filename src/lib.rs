@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use sentencepiece::SentencePieceProcessor;
+use sentencepiece_rust::SentencePieceProcessor;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::ffi::OsString;
 use std::io::{Read, Write};
@@ -48,31 +48,31 @@ pub struct GenerateRequest {
     pub cfg_scale: f32,
     #[serde(alias = "seconds_total", alias = "max_audio_length_ms")]
     pub length: usize,
-    /// ODE steps for HeartMula flow matching (lower = faster, 10 = default)
+
     #[serde(default = "default_ode_steps")]
     pub ode_steps: usize,
-    /// Lyrics prompt (alias for prompt)
+
     #[serde(default)]
     pub lyrics: Option<String>,
-    /// Tags / style prompt
+
     #[serde(default)]
     pub tags: Option<String>,
-    /// Top-k sampling for HeartMula token generation
+
     #[serde(default = "default_topk")]
     pub topk: usize,
-    /// Sampling temperature for HeartMula token generation
+
     #[serde(default = "default_temperature")]
     pub temperature: f32,
-    /// Decode an existing frames JSON instead of generating tokens
+
     #[serde(default)]
     pub decode_only: bool,
-    /// Input frames JSON for decode-only mode
+
     #[serde(default)]
     pub frames_json: Option<PathBuf>,
-    /// Number of worker threads to use for decode-only CPU decoding
+
     #[serde(default)]
     pub decode_threads: Option<usize>,
-    /// Seed for deterministic HeartCodec decoder latent initialization
+
     #[serde(default)]
     pub decoder_seed: u64,
 }
@@ -108,7 +108,6 @@ pub struct GenerateError {
     pub error: String,
 }
 
-/// Progress update message sent during generation
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct GenerateProgress {
     pub phase: String,
@@ -503,24 +502,22 @@ pub fn encode_prompt(
 ) -> Result<(Vec<i64>, Vec<i64>)> {
     let mut token_ids = Vec::with_capacity(max_tokens);
 
-    if let Some(bos_id) = tokenizer.bos_id() {
-        token_ids.push(i64::from(bos_id));
+    if tokenizer.vocab().bos_id >= 0 {
+        token_ids.push(i64::from(tokenizer.vocab().bos_id));
     }
 
-    for piece in tokenizer
+    for id in tokenizer
         .encode(prompt)
         .context("failed to tokenize prompt")?
     {
         if token_ids.len() >= max_tokens {
             break;
         }
-        token_ids.push(i64::from(piece.id));
+        token_ids.push(i64::from(id));
     }
 
-    if token_ids.len() < max_tokens
-        && let Some(eos_id) = tokenizer.eos_id()
-    {
-        token_ids.push(i64::from(eos_id));
+    if token_ids.len() < max_tokens && tokenizer.vocab().eos_id >= 0 {
+        token_ids.push(i64::from(tokenizer.vocab().eos_id));
     }
 
     if token_ids.len() > max_tokens {

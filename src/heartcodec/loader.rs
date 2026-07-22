@@ -1,18 +1,8 @@
-//! Weight loading utilities for HeartCodec
-//!
-//! Handles PyTorch weight normalization by computing actual weights at load time:
-//! weight = original0 * (original1 / norm(original1))
-
 use burn::nn::PaddingConfig1d;
 use burn::nn::conv::{Conv1d, Conv1dConfig};
 use burn::prelude::Backend;
 use burn::tensor::Tensor;
 
-/// Load weight-normalized Conv1d weights into a standard Conv1d
-///
-/// The burnpack stores:
-/// - `parametrizations.weight.original0`: [out_ch, 1, 1] - magnitude
-/// - `parametrizations.weight.original1`: [out_ch, in_ch/groups, kernel] - direction
 #[allow(clippy::too_many_arguments)]
 pub fn load_weight_norm_conv1d<B: Backend>(
     device: &B::Device,
@@ -60,7 +50,6 @@ pub fn load_weight_norm_conv1d<B: Backend>(
     conv
 }
 
-/// Compute weight from weight normalization decomposition
 pub fn compute_weight_norm_weight<B: Backend>(g: &Tensor<B, 3>, v: &Tensor<B, 3>) -> Tensor<B, 3> {
     let v_norm_sq = v.clone().powf_scalar(2.0).sum_dim(2).sum_dim(1);
     let v_norm = v_norm_sq.sqrt();
