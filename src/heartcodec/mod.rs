@@ -1,8 +1,3 @@
-//! HeartCodec audio decoder - Rust implementation
-//!
-//! This module implements the HeartCodec model for audio decoding.
-//! The model structure matches the burnpack weights exactly.
-
 pub mod conv;
 pub mod loader;
 
@@ -26,7 +21,6 @@ const HEARTCODEC_WINDOW_FRAMES: usize = 93;
 const HEARTCODEC_SEGMENT_DURATION_SECONDS: f32 = 29.76;
 type TensorLookup = dyn Fn(&str) -> Option<(Vec<f32>, Vec<usize>)>;
 
-/// Configuration for HeartCodec
 #[derive(Debug, Clone)]
 pub struct HeartCodecConfig {
     pub dim: usize,
@@ -52,7 +46,7 @@ pub struct HeartCodecConfig {
     pub delay_kernel_size: usize,
     pub res_kernel_size: usize,
     pub causal: bool,
-    /// Number of ODE steps for flow matching (lower = faster, higher = better quality)
+
     pub ode_steps: usize,
 }
 
@@ -87,7 +81,6 @@ impl Default for HeartCodecConfig {
     }
 }
 
-/// HeartCodec model - top level module
 #[derive(Module, Debug)]
 pub struct HeartCodecModel<B: Backend> {
     pub flow_matching: FlowMatching<B>,
@@ -114,19 +107,11 @@ impl<B: Backend> HeartCodecModel<B> {
         }
     }
 
-    /// Set the number of ODE steps for flow matching
-    /// Lower values (5-8) = faster generation, moderate quality
-    /// Default (10) = good quality
-    /// Higher values (15-20) = best quality, slower
     pub fn with_ode_steps(mut self, steps: usize) -> Self {
         self.ode_steps = steps.clamp(1, 50);
         self
     }
 
-    /// Set the guidance scale for CFG in flow matching
-    /// 1.0 = no CFG (faster, less controlled)
-    /// 2.0 = default CFG (better quality, follows conditioning better)
-    /// Higher = stronger guidance (may be more stable)
     pub fn with_guidance_scale(mut self, scale: f32) -> Self {
         self.guidance_scale = scale.max(1.0);
         self
@@ -143,7 +128,6 @@ impl<B: Backend> HeartCodecModel<B> {
         Ok(model)
     }
 
-    /// Manually load flow_matching weights from burnpack
     fn load_flow_matching_manually<F>(
         _flow_matching: &mut FlowMatching<B>,
         _path: &std::path::Path,
@@ -182,7 +166,6 @@ impl<B: Backend> HeartCodecModel<B> {
         })
     }
 
-    /// Load with tensor name mapping to handle dot notation vs underscore notation
     fn load_with_mapping(path: &std::path::Path, device: &B::Device) -> Result<Self> {
         use burn::tensor::DType;
         use burn_store::ModuleStore;
@@ -512,12 +495,6 @@ impl<B: Backend> HeartCodecModel<B> {
         Self::decode_scalar_plan_impl(&self.scalar_model, plan)
     }
 
-    /// Decode codes to audio.
-    ///
-    /// This implements the full HeartCodec pipeline:
-    /// 1. VQ codebook lookup
-    /// 2. Flow matching ODE solver to generate latents
-    /// 3. Scalar model decode to audio
     pub fn decode(&self, codes: Tensor<B, 3, Int>) -> Tensor<B, 3> {
         let [batch, _num_quantizers, _seq_len] = codes.dims();
         let latent_length = (HEARTCODEC_SEGMENT_DURATION_SECONDS * 25.0) as usize;
@@ -539,7 +516,6 @@ impl<B: Backend> HeartCodecModel<B> {
     }
 }
 
-/// FlowMatching module
 #[derive(Module, Debug)]
 pub struct FlowMatching<B: Backend> {
     pub cond_feature_emb: Linear<B>,
@@ -563,7 +539,6 @@ impl<B: Backend> FlowMatching<B> {
         }
     }
 
-    /// Load FlowMatching using standard Burn Module::load_from
     pub fn load_from_burnpack(path: &std::path::Path, device: &B::Device) -> Result<Self> {
         let mut model = Self::new(device, &HeartCodecConfig::default());
         let mut store = BurnpackStore::from_file(path).zero_copy(true);
@@ -583,8 +558,6 @@ impl<B: Backend> FlowMatching<B> {
         Ok(model)
     }
 
-    /// Simple 1D nearest neighbor interpolation
-    /// For scale_factor=2, each element is repeated twice
     fn interpolate_1d(x: &Tensor<B, 3>, scale_factor: usize) -> Tensor<B, 3> {
         let [batch, seq_len, channels] = x.dims();
         if scale_factor <= 1 {
@@ -601,12 +574,6 @@ impl<B: Backend> FlowMatching<B> {
         Tensor::cat(repeated_steps, 1)
     }
 
-    /// Solve the flow matching ODE to generate latents
-    ///
-    /// conditioning: [batch, seq_len, 512] - the conditioning from VQ embeddings
-    /// num_steps: Number of ODE integration steps (10 = default quality, 5 = fast, 20 = best)
-    /// guidance_scale: CFG scale (1.0 = no CFG, 2.0 = default CFG, higher = stronger guidance)
-    /// Returns: [batch, seq_len, latent_dim] - the generated latents
     #[allow(clippy::too_many_arguments)]
     pub fn solve_ode(
         &self,
@@ -754,7 +721,6 @@ impl<B: Backend> FlowMatching<B> {
         latent
     }
 
-    /// Python-compatible entrypoint mirroring `FlowMatching.inference_codes(...)`.
     #[allow(clippy::too_many_arguments)]
     pub fn inference_codes(
         &self,
@@ -835,7 +801,6 @@ impl<B: Backend> FlowMatching<B> {
     }
 }
 
-/// Residual VQ for codebook lookup
 #[derive(Module, Debug)]
 pub struct ResidualVQ<B: Backend> {
     pub layers: Vec<VQCodebook<B>>,
@@ -862,7 +827,6 @@ impl<B: Backend> ResidualVQ<B> {
         }
     }
 
-    /// Load ResidualVQ from burnpack
     pub fn load_from_dot_notation<F>(device: &B::Device, get_tensor: &F) -> Result<Self>
     where
         F: Fn(&str) -> Option<(Vec<f32>, Vec<usize>)>,
@@ -931,7 +895,6 @@ impl<B: Backend> ResidualVQ<B> {
     }
 }
 
-/// Single VQ codebook layer wrapper
 #[derive(Module, Debug)]
 pub struct VQCodebook<B: Backend> {
     pub _codebook: VQCodebookInner<B>,
@@ -945,7 +908,6 @@ impl<B: Backend> VQCodebook<B> {
     }
 }
 
-/// Inner codebook with actual tensors
 #[derive(Module, Debug)]
 pub struct VQCodebookInner<B: Backend> {
     pub cluster_size: Param<Tensor<B, 2>>,
@@ -963,7 +925,6 @@ impl<B: Backend> VQCodebookInner<B> {
     }
 }
 
-/// LlamaTransformer for flow matching
 #[derive(Module, Debug)]
 pub struct LlamaTransformer<B: Backend> {
     pub proj_in: ProjectLayer<B>,
@@ -1031,8 +992,6 @@ impl<B: Backend> LlamaTransformer<B> {
         }
     }
 
-    /// Load LlamaTransformer from burnpack using manual tensor loading
-    /// Handles dot notation names like "transformer_blocks.0.attn.q_proj.weight"
     pub fn load_from_burnpack<F>(device: &B::Device, get_tensor: &F) -> Result<Self>
     where
         F: Fn(&str) -> Option<(Vec<f32>, Vec<usize>)>,
@@ -1142,11 +1101,6 @@ impl<B: Backend> LlamaTransformer<B> {
         })
     }
 
-    /// Forward pass through the transformer
-    ///
-    /// hidden_states: [batch, seq_len, in_channels] - concatenated [x, incontext_x, mu] = 1024
-    /// t: f32 - timestep (0 to 1)
-    /// Returns: [batch, seq_len, out_channels] - velocity field = 256
     pub fn forward(&self, hidden_states: &Tensor<B, 3>, t: f32, step: usize) -> Tensor<B, 3> {
         let mut s = self.proj_in.forward(hidden_states.clone(), step);
         let (timestep_mod, embedded_timestep) = self.adaln_single.forward(t, s.dtype());
@@ -1183,7 +1137,6 @@ impl<B: Backend> LlamaTransformer<B> {
     }
 }
 
-/// Transformer block with attention and MLP
 #[derive(Module, Debug)]
 pub struct TransformerBlock<B: Backend> {
     pub attn: Attention<B>,
@@ -1204,7 +1157,6 @@ impl<B: Backend> TransformerBlock<B> {
         }
     }
 
-    /// Load TransformerBlock from tensors
     pub fn load_from_tensors<F>(
         device: &B::Device,
         get_tensor: &F,
@@ -1299,9 +1251,6 @@ impl<B: Backend> TransformerBlock<B> {
         })
     }
 
-    /// Forward pass through transformer block
-    /// x: [batch, seq_len, dim]
-    /// Returns: [batch, seq_len, dim]
     pub fn forward(
         &self,
         x: Tensor<B, 3>,
@@ -1341,7 +1290,6 @@ impl<B: Backend> TransformerBlock<B> {
     }
 }
 
-/// Attention module
 #[derive(Module, Debug)]
 pub struct Attention<B: Backend> {
     pub q_proj: Linear<B>,
@@ -1379,9 +1327,6 @@ impl<B: Backend> Attention<B> {
         }
     }
 
-    /// Forward pass through attention
-    /// x: [batch, seq_len, dim]
-    /// Returns: [batch, seq_len, dim]
     pub fn forward(&self, x: Tensor<B, 3>, _dump_attention: bool, _step: usize) -> Tensor<B, 3> {
         let [batch, seq_len, dim] = x.dims();
         let num_heads = self.num_heads;
@@ -1415,7 +1360,6 @@ impl<B: Backend> Attention<B> {
         self.o_proj.forward(out)
     }
 
-    /// Apply Rotary Position Embedding (RoPE)
     fn apply_rope(
         q: Tensor<B, 4>,
         k: Tensor<B, 4>,
@@ -1472,7 +1416,6 @@ impl<B: Backend> Attention<B> {
     }
 }
 
-/// MLP module
 #[derive(Module, Debug)]
 pub struct Mlp<B: Backend> {
     pub gate: Linear<B>,
@@ -1505,9 +1448,6 @@ impl<B: Backend> Mlp<B> {
         multiple_of * hidden_dim.div_ceil(multiple_of)
     }
 
-    /// Forward pass through SwiGLU MLP
-    /// x: [batch, seq_len, dim]
-    /// Returns: [batch, seq_len, dim]
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         use burn::tensor::activation::silu;
 
@@ -1522,7 +1462,6 @@ impl<B: Backend> Mlp<B> {
     }
 }
 
-/// RMS Norm
 #[derive(Module, Debug)]
 pub struct RmsNorm<B: Backend> {
     pub weight: Param<Tensor<B, 1>>,
@@ -1535,9 +1474,6 @@ impl<B: Backend> RmsNorm<B> {
         }
     }
 
-    /// Forward pass: x * weight / sqrt(mean(x^2) + eps)
-    /// x: [batch, seq_len, dim]
-    /// Returns: [batch, seq_len, dim]
     pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let eps = 1e-6;
         let weight = self.weight.val();
@@ -1557,8 +1493,6 @@ impl<B: Backend> RmsNorm<B> {
     }
 }
 
-/// AdaLayerNormSingle for timestep conditioning
-/// Matches Python: AdaLayerNormSingleFlow with PixArtAlphaCombinedFlowEmbeddings
 #[derive(Module, Debug)]
 pub struct AdaLayerNormSingle<B: Backend> {
     pub emb: PixArtAlphaCombinedFlowEmbeddings<B>,
@@ -1576,7 +1510,6 @@ impl<B: Backend> AdaLayerNormSingle<B> {
         }
     }
 
-    /// Load AdaLayerNormSingle from tensors
     pub fn load_from_tensors<F>(
         device: &B::Device,
         get_tensor: &F,
@@ -1618,8 +1551,6 @@ impl<B: Backend> AdaLayerNormSingle<B> {
     }
 }
 
-/// PixArtAlphaCombinedFlowEmbeddings - timestep embedding for flow matching
-/// Matches Python: PixArtAlphaCombinedFlowEmbeddings
 #[derive(Module, Debug)]
 pub struct PixArtAlphaCombinedFlowEmbeddings<B: Backend> {
     pub timestep_embedder: TimestepEmbedding<B>,
@@ -1632,7 +1563,6 @@ impl<B: Backend> PixArtAlphaCombinedFlowEmbeddings<B> {
         }
     }
 
-    /// Load PixArtAlphaCombinedFlowEmbeddings from tensors
     pub fn load_from_tensors<F>(
         device: &B::Device,
         get_tensor: &F,
@@ -1673,8 +1603,6 @@ impl<B: Backend> PixArtAlphaCombinedFlowEmbeddings<B> {
     }
 }
 
-/// TimestepEmbedding - projects sinusoidal embeddings to model dimension
-/// Matches Python: TimestepEmbedding  
 #[derive(Module, Debug)]
 pub struct TimestepEmbedding<B: Backend> {
     pub linear_1: Linear<B>,
@@ -1695,7 +1623,6 @@ impl<B: Backend> TimestepEmbedding<B> {
         }
     }
 
-    /// Load TimestepEmbedding from tensors
     pub fn load_from_tensors<F>(
         device: &B::Device,
         get_tensor: &F,
@@ -1733,7 +1660,6 @@ impl<B: Backend> TimestepEmbedding<B> {
     }
 }
 
-/// ProjectLayer: Conv1d + Linear
 #[derive(Module, Debug)]
 pub struct ProjectLayer<B: Backend> {
     pub ffn_1: Conv1d<B>,
@@ -1763,9 +1689,6 @@ impl<B: Backend> ProjectLayer<B> {
         }
     }
 
-    /// Forward pass: Conv1d -> Linear
-    /// x: [batch, seq_len, in_channels]
-    /// Returns: [batch, seq_len, out_channels]
     pub fn forward(&self, x: Tensor<B, 3>, _step: usize) -> Tensor<B, 3> {
         let x_t = x.swap_dims(1, 2);
 
@@ -1819,7 +1742,6 @@ impl<B: Backend> ProjectLayer<B> {
         out.swap_dims(1, 2)
     }
 
-    /// Load ProjectLayer from tensors with actual weights
     pub fn load_from_tensors<F>(
         device: &B::Device,
         get_tensor: &F,
@@ -1892,12 +1814,6 @@ impl<B: Backend> ProjectLayer<B> {
     }
 }
 
-/// ScalarModel - neural codec
-/// Structure matches the Python model exactly:
-/// - decoder.0: Conv1d(128, 2048, k=5) - initial projection
-/// - decoder.1-5: ResDecoderBlocks with upsampling
-/// - decoder.6: PostProcessor(num_samples=2)
-/// - decoder.7: Conv1d(64, 1, k=7) - final output
 #[derive(Module, Debug)]
 pub struct ScalarModel<B: Backend> {
     pub decoder_0: WNConv1d<B>,
@@ -1950,8 +1866,6 @@ impl<B: Backend> ScalarModel<B> {
         }
     }
 
-    /// Load scalar model with dot notation names from burnpack
-    /// Tries both naming conventions for weights
     pub fn load_from_dot_notation<F>(
         _path: &std::path::Path,
         device: &B::Device,
@@ -2092,7 +2006,6 @@ impl<B: Backend> ScalarModel<B> {
         self.decoder_7.forward(h)
     }
 
-    /// Decode with periodic device sync to prevent GPU timeout on long sequences
     pub fn decode_with_sync(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let x_quantized = (x.clone() * 9.0).round() / 9.0;
 
@@ -2136,8 +2049,6 @@ impl<B: Backend> ScalarModel<B> {
     }
 }
 
-/// ResDecoderBlock with upsampling and residual units
-/// Structure: up_conv -> [ResidualUnit x 5]
 #[derive(Module, Debug)]
 pub struct ResDecoderBlock<B: Backend> {
     pub up_conv: WNConvTranspose1d<B>,
@@ -2177,8 +2088,6 @@ impl<B: Backend> ResDecoderBlock<B> {
         Self { up_conv, convs }
     }
 
-    /// Load ResDecoderBlock with dot notation names from burnpack
-    /// Tries both naming conventions for weights
     pub fn load_from_dot_notation<F>(
         device: &B::Device,
         get_tensor: &F,
@@ -2314,7 +2223,6 @@ impl<B: Backend> ResDecoderBlock<B> {
     }
 }
 
-/// Residual unit with two weight-normalized convolutions
 #[derive(Module, Debug)]
 pub struct ResidualUnit<B: Backend> {
     pub conv1: WNConv1d<B>,
@@ -2343,10 +2251,6 @@ impl<B: Backend> ResidualUnit<B> {
         }
     }
 
-    /// Load ResidualUnit with dot notation names from burnpack
-    /// Tries both naming conventions:
-    /// - Direct: weight_g, weight_v
-    /// - PyTorch parametrizations: parametrizations.weight.original0, parametrizations.weight.original1
     pub fn load_from_dot_notation<F>(
         device: &B::Device,
         get_tensor: &F,
@@ -2481,7 +2385,6 @@ impl<B: Backend> ResidualUnit<B> {
     }
 }
 
-/// PReLU activation
 #[derive(Module, Debug)]
 pub struct PReLU<B: Backend> {
     pub weight: Param<Tensor<B, 1>>,
@@ -2504,7 +2407,6 @@ impl<B: Backend> PReLU<B> {
     }
 }
 
-/// Write WAV file from f32 samples
 pub fn write_wav_from_f32(samples: &[f32], sample_rate: u32, path: &std::path::Path) -> Result<()> {
     write_wav_float32_impl(samples.len(), 1, sample_rate, path, |bytes| {
         bytes
@@ -2625,7 +2527,6 @@ fn write_wav_float32_impl(
     Ok(())
 }
 
-/// Convert frames to tensor
 pub fn frames_to_tensor<B: Backend>(frames: &[Vec<i64>], device: &B::Device) -> Tensor<B, 3, Int> {
     let num_frames = frames.len();
     let num_codebooks = if num_frames > 0 { frames[0].len() } else { 8 };
@@ -2650,10 +2551,6 @@ pub fn frames_to_tensor<B: Backend>(frames: &[Vec<i64>], device: &B::Device) -> 
     )
 }
 
-/// Helper function to load a Linear layer from tensors
-/// Creates Linear with actual loaded weights (not initialized)
-/// For Col layout: weight shape is [in_dim, out_dim]
-/// PyTorch stores weights as [out_dim, in_dim], so we need to transpose
 fn load_linear_from_tensors<B: Backend, F>(
     device: &B::Device,
     get_tensor: &F,
@@ -2704,7 +2601,6 @@ where
     })
 }
 
-/// Helper function to load RMSNorm from tensors
 fn load_rmsnorm_from_tensors<B: Backend, F>(
     device: &B::Device,
     get_tensor: &F,
@@ -2731,7 +2627,6 @@ where
     })
 }
 
-/// Helper function to load a Param tensor
 fn load_param_tensor<B: Backend, F, const D: usize>(
     device: &B::Device,
     get_tensor: &F,

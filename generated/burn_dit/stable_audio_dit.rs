@@ -277,7 +277,7 @@ impl<B: Backend> Default for Model<B> {
 }
 
 impl<B: Backend> Model<B> {
-    /// Load model weights from a burnpack file.
+
     pub fn from_file(file: &str, device: &B::Device) -> Self {
         let mut model = Self::new(device);
         let mut store = BurnpackStore::from_file(file);

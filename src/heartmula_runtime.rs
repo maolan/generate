@@ -17,7 +17,7 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use tokenizers::Tokenizer;
+use tokie::Tokenizer;
 
 const HEARTMULA_PARALLEL_TOKENS: usize = 9;
 const HEARTMULA_AUDIO_CODEBOOKS: usize = 8;
@@ -144,15 +144,13 @@ pub struct HeartmulaGenerationConfig<'a> {
     pub lyrics_ids: &'a [i64],
     pub tags_ids: &'a [i64],
     pub max_audio_frames: usize,
-    /// Sampling temperature (higher = more random, lower = more deterministic)
+
     pub temperature: f32,
-    /// Top-k sampling (only consider top k tokens)
+
     pub topk: usize,
-    /// CFG scale for classifier-free guidance (1.0 = no CFG, higher = stronger guidance)
+
     pub cfg_scale: f32,
-    /// Optional progress callback: (phase, progress_0_to_1, operation_description)
-    /// phase is either "generator" or "decoder"
-    /// Note: This callback is called synchronously on the same thread during generation
+
     pub progress_callback: Option<Box<ProgressCallback<'a>>>,
 }
 
@@ -1589,19 +1587,14 @@ impl<B: Backend> HeartmulaRmsNorm<B> {
 }
 
 pub fn tokenize_text(tokenizer_json: &Path, text: &str) -> Result<Vec<i64>> {
-    let tokenizer = Tokenizer::from_file(tokenizer_json).map_err(|e| {
+    let tokenizer = Tokenizer::from_json(tokenizer_json).map_err(|e| {
         anyhow!(
             "failed to load tokenizer from {}: {e}",
             tokenizer_json.display()
         )
     })?;
-    let encoding = tokenizer.encode(text, true).map_err(|e| {
-        anyhow!(
-            "failed to encode text with {}: {e}",
-            tokenizer_json.display()
-        )
-    })?;
-    Ok(encoding.get_ids().iter().map(|&id| i64::from(id)).collect())
+    let encoding = tokenizer.encode(text, true);
+    Ok(encoding.ids.into_iter().map(i64::from).collect())
 }
 
 pub fn default_tags() -> &'static str {
@@ -1637,7 +1630,6 @@ pub fn write_frames_json(path: &Path, lyrics: &str, tags: &str, frames: &[Vec<i6
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
-/// Decode frames to WAV using Rust HeartCodec implementation
 #[allow(clippy::too_many_arguments)]
 pub fn decode_frames_to_wav<B: burn::prelude::Backend>(
     model_dir: &Path,
@@ -2226,13 +2218,6 @@ fn tensor_to_f32_vec<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Result
         .map_err(|e| anyhow!("failed to materialize tensor as f32: {:?}", e))
 }
 
-/// Sample a token from logits using top-k sampling with temperature
-///
-/// Implements the same algorithm as Python:
-/// 1. Apply temperature scaling
-/// 2. Top-k filtering
-/// 3. Softmax to get probabilities
-/// 4. Sample with argmax(probs / Exp(1))
 fn sample_token<B: Backend>(logits: &Tensor<B, 2>, temperature: f32, topk: usize) -> Result<i64> {
     use burn::tensor::Distribution;
     use burn::tensor::activation::softmax;
@@ -2284,7 +2269,6 @@ fn sample_token<B: Backend>(logits: &Tensor<B, 2>, temperature: f32, topk: usize
     Ok(token)
 }
 
-/// Legacy argmax token for backward compatibility
 fn argmax_token<B: Backend>(logits: &Tensor<B, 2>) -> Result<i64> {
     let logits_data = logits.clone().cast(DType::F32).to_data();
     let logits_vec: Vec<f32> = logits_data

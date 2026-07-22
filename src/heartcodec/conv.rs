@@ -1,13 +1,9 @@
-//! Custom convolution modules with weight normalization support
-
 use burn::module::{Module, Param};
 use burn::prelude::Backend;
 use burn::tensor::Tensor;
 use burn::tensor::module::{conv_transpose1d, conv1d};
 use burn::tensor::ops::{ConvOptions, ConvTransposeOptions, PadMode};
 
-/// Conv1d with weight normalization support
-/// Stores the decomposed weights and computes actual weight on the fly
 #[derive(Module, Debug)]
 pub struct WNConv1d<B: Backend> {
     pub bias: Param<Tensor<B, 1>>,
@@ -52,7 +48,6 @@ impl<B: Backend> WNConv1d<B> {
         }
     }
 
-    /// Compute the actual weight from decomposition
     fn compute_weight(&self) -> Tensor<B, 3> {
         let g = self.weight_g.val();
         let v = self.weight_v.val();
@@ -90,13 +85,11 @@ impl<B: Backend> WNConv1d<B> {
         conv1d(x, weight, Some(bias), options)
     }
 
-    /// Get kernel size from weight_v shape
     pub fn kernel_size(&self) -> usize {
         self.weight_v.dims()[2]
     }
 }
 
-/// ConvTranspose1d with weight normalization support
 #[derive(Module, Debug)]
 pub struct WNConvTranspose1d<B: Backend> {
     pub bias: Param<Tensor<B, 1>>,
@@ -142,8 +135,6 @@ impl<B: Backend> WNConvTranspose1d<B> {
         }
     }
 
-    /// Compute the actual weight from decomposition
-    /// Matches PyTorch's weight_norm on ConvTranspose1d (norm along input dim)
     fn compute_weight(&self) -> Tensor<B, 3> {
         let g = self.weight_g.val();
         let v = self.weight_v.val();
@@ -180,7 +171,6 @@ impl<B: Backend> WNConvTranspose1d<B> {
     }
 }
 
-/// Load WNConv1d from tensor data
 pub struct WNConv1dLoadArgs {
     pub in_channels: usize,
     pub out_channels: usize,
@@ -228,7 +218,6 @@ pub fn load_wnconv_from_tensors<B: Backend>(
     })
 }
 
-/// Load WNConvTranspose1d from tensor data
 pub struct WNConvTranspose1dLoadArgs {
     pub out_channels: usize,
     pub kernel_size: usize,
@@ -276,7 +265,6 @@ pub fn load_wnconv_transpose_from_tensors<B: Backend>(
     })
 }
 
-/// Load PReLU from tensor data
 pub fn load_prelu_from_tensor<B: Backend>(
     device: &B::Device,
     data: Vec<f32>,
@@ -292,8 +280,6 @@ pub fn load_prelu_from_tensor<B: Backend>(
     })
 }
 
-/// Simple Conv1d without weight normalization
-/// Used for decoder.6 which is a regular Conv1d + PReLU in the original model
 #[derive(Module, Debug)]
 pub struct PlainConv1d<B: Backend> {
     pub weight: Param<Tensor<B, 3>>,
@@ -432,7 +418,6 @@ impl<B: Backend> PlainConv1d<B> {
     }
 }
 
-/// Load Conv1d from regular weight/bias tensors (not weight-normalized)
 pub struct Conv1dLoadArgs {
     pub in_channels: usize,
     pub out_channels: usize,
