@@ -2,10 +2,15 @@ use anyhow::{Context, Result, anyhow};
 use burn::prelude::Backend;
 use burn_store::{BurnpackStore, ModuleStore, TensorSnapshot};
 use huggingface_hub::{Repo, RepoType, api::sync::ApiBuilder};
+use maolan_generate::acestep::{
+    AceStepModelPaths, AceStepPipeline, AceStepVariant, GenerateAudioMeta, GenerateMetadata,
+};
+use maolan_generate::heartcodec;
 use maolan_generate::heartmula_runtime;
 use maolan_generate::{
     BackendChoice, GenerateError, GenerateProgress, GenerateResponseHeader, IPC_MODE_ENV,
-    ModelChoice, help_text, parse_options, read_ipc_message, validate_options, write_ipc_message,
+    ModelChoice, help_text, parse_options, read_ipc_message, stderr_logging_enabled,
+    validate_options, write_ipc_message,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -20,6 +25,8 @@ const HEARTMULA_GENERATE_ONLY_ENV: &str = "MAOLAN_HEARTMULA_GENERATE_ONLY";
 const HEARTMULA_HAPPY_NEW_YEAR_REPO_ID: &str = "maolandaw/HeartMuLa-happy-new-year-burn";
 const HEARTMULA_RL_REPO_ID: &str = "maolandaw/HeartMuLa-RL-oss-3B-20260123";
 const HEARTCODEC_REPO_ID: &str = "maolandaw/HeartCodec-oss-20260123-burn";
+const ACESTEP_REPO_ID: &str = "maolandaw/ACE-Step-1.5-burn";
+const ACESTEP_SFT_REPO_ID: &str = "maolandaw/ACE-Step-1.5-sft-burn";
 const HEARTMULA_TOKENIZER_REL: &str = "tokenizer.json";
 const HEARTMULA_GEN_CONFIG_REL: &str = "gen_config.json";
 
@@ -60,6 +67,13 @@ fn main() -> Result<()> {
 
     if options.decode_only {
         return run_decode_only(&options);
+    }
+
+    if matches!(
+        options.model,
+        ModelChoice::AceStepTurbo | ModelChoice::AceStepSft
+    ) {
+        return run_acestep_cli(&options);
     }
 
     if env::var_os(HEARTMULA_GENERATE_ONLY_ENV).is_none() {
@@ -197,28 +211,59 @@ fn run_ipc() -> Result<()> {
     let mut stdout = io::stdout().lock();
     let options = validate_options(read_ipc_message(&mut stdin)?)?;
 
-    let output = match catch_ipc_generation_failure(AssertUnwindSafe(|| match options.backend {
-        BackendChoice::Cpu => {
-            let device = Default::default();
-            run_heartmula_ipc_with_backend::<burn::backend::NdArray<f32>>(
-                &options,
-                &device,
-                BackendChoice::Cpu,
-                &mut stdout,
-            )
+    let output = match catch_ipc_generation_failure(AssertUnwindSafe(|| {
+        if matches!(
+            options.model,
+            ModelChoice::AceStepTurbo | ModelChoice::AceStepSft
+        ) {
+            return match options.backend {
+                BackendChoice::Cpu => {
+                    let device = Default::default();
+                    run_acestep_ipc_with_backend::<burn::backend::NdArray<f32>>(
+                        &options,
+                        &device,
+                        BackendChoice::Cpu,
+                        &mut stdout,
+                    )
+                }
+                BackendChoice::Vulkan => {
+                    let device = burn::backend::wgpu::WgpuDevice::default();
+                    burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
+                        &device,
+                        vulkan_runtime_options(),
+                    );
+                    run_acestep_ipc_with_backend::<burn::backend::Wgpu<f32, i64, u32>>(
+                        &options,
+                        &device,
+                        BackendChoice::Vulkan,
+                        &mut stdout,
+                    )
+                }
+            };
         }
-        BackendChoice::Vulkan => {
-            let device = burn::backend::wgpu::WgpuDevice::default();
-            burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
-                &device,
-                vulkan_runtime_options(),
-            );
-            run_heartmula_ipc_with_backend::<burn::backend::Wgpu<f32, i64, u32>>(
-                &options,
-                &device,
-                BackendChoice::Vulkan,
-                &mut stdout,
-            )
+        match options.backend {
+            BackendChoice::Cpu => {
+                let device = Default::default();
+                run_heartmula_ipc_with_backend::<burn::backend::NdArray<f32>>(
+                    &options,
+                    &device,
+                    BackendChoice::Cpu,
+                    &mut stdout,
+                )
+            }
+            BackendChoice::Vulkan => {
+                let device = burn::backend::wgpu::WgpuDevice::default();
+                burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
+                    &device,
+                    vulkan_runtime_options(),
+                );
+                run_heartmula_ipc_with_backend::<burn::backend::Wgpu<f32, i64, u32>>(
+                    &options,
+                    &device,
+                    BackendChoice::Vulkan,
+                    &mut stdout,
+                )
+            }
         }
     })) {
         Ok(output) => output,
@@ -285,6 +330,8 @@ fn model_name(model: ModelChoice) -> &'static str {
     match model {
         ModelChoice::HappyNewYear => "happy-new-year",
         ModelChoice::Rl => "RL",
+        ModelChoice::AceStepTurbo => "acestep-turbo",
+        ModelChoice::AceStepSft => "acestep-sft",
     }
 }
 
@@ -292,6 +339,17 @@ fn heartmula_repo_id(model: ModelChoice) -> &'static str {
     match model {
         ModelChoice::HappyNewYear => HEARTMULA_HAPPY_NEW_YEAR_REPO_ID,
         ModelChoice::Rl => HEARTMULA_RL_REPO_ID,
+        // ACE-Step models resolve their own repos and never reach this
+        // function; the arms keep the match total.
+        ModelChoice::AceStepTurbo => ACESTEP_REPO_ID,
+        ModelChoice::AceStepSft => ACESTEP_SFT_REPO_ID,
+    }
+}
+
+fn acestep_variant(model: ModelChoice) -> AceStepVariant {
+    match model {
+        ModelChoice::AceStepSft => AceStepVariant::Sft,
+        _ => AceStepVariant::Turbo,
     }
 }
 
@@ -406,6 +464,159 @@ fn ensure_heartmula_model_paths(paths: &HeartmulaModelPaths) -> Result<()> {
         paths.heartcodec_model_dir.display(),
         missing.join(", ")
     )
+}
+
+fn resolve_acestep_model_dir(
+    model_dir_override: Option<&Path>,
+    model: ModelChoice,
+) -> Result<PathBuf> {
+    match model_dir_override {
+        Some(model_dir) => Ok(model_dir.to_path_buf()),
+        None => {
+            let (repo_id, variant) = match model {
+                ModelChoice::AceStepSft => (ACESTEP_SFT_REPO_ID, AceStepVariant::Sft),
+                _ => (ACESTEP_REPO_ID, AceStepVariant::Turbo),
+            };
+            ensure_repo_snapshot_dir(repo_id, AceStepModelPaths::required_relative_files(variant))
+        }
+    }
+}
+
+fn run_acestep_generation<B: Backend>(
+    options: &maolan_generate::CliOptions,
+    device: &B::Device,
+    progress: &mut dyn FnMut(&str, f32, &str),
+) -> Result<GenerateAudioMeta> {
+    let model_dir = resolve_acestep_model_dir(options.model_dir.as_deref(), options.model)?;
+    let model_paths = AceStepModelPaths::resolve(&model_dir, acestep_variant(options.model))?;
+    let pipeline = AceStepPipeline::<B>::load(&model_paths, device, &mut *progress)?;
+    let metadata = GenerateMetadata {
+        bpm: options.bpm,
+        key_scale: options.key_scale.as_deref(),
+        time_signature: options.time_signature.as_deref(),
+    };
+    let (audio, meta) = pipeline.generate(
+        &options.prompt,
+        &metadata,
+        options.length,
+        options.decoder_seed,
+        &mut *progress,
+    )?;
+    drop(pipeline);
+    release_backend_allocations::<B>(device)?;
+
+    progress("writer", 0.0, "Writing WAV");
+    let [_, channels, frames] = audio.dims();
+    let channel_major: Vec<f32> = audio
+        .into_data()
+        .convert::<f32>()
+        .to_vec()
+        .map_err(|err| anyhow!("failed to read generated audio tensor: {err}"))?;
+    let mut interleaved = vec![0.0_f32; channel_major.len()];
+    for (channel, samples) in channel_major.chunks_exact(frames).enumerate() {
+        for (frame, sample) in samples.iter().enumerate() {
+            interleaved[frame * channels + channel] = *sample;
+        }
+    }
+    heartcodec::write_wav_from_f32_interleaved(
+        &interleaved,
+        channels,
+        frames,
+        meta.sample_rate_hz,
+        &options.output_path,
+    )?;
+    progress("writer", 1.0, "Done");
+    Ok(meta)
+}
+
+fn run_acestep_ipc_with_backend<B: Backend>(
+    options: &maolan_generate::CliOptions,
+    device: &B::Device,
+    backend: BackendChoice,
+    stdout: &mut impl std::io::Write,
+) -> Result<GeneratedOutput> {
+    use std::cell::Cell;
+    let last_progress = Cell::new(None::<f32>);
+
+    let mut progress_callback = |phase: &str, p: f32, op: &str| {
+        if should_forward_ipc_progress(last_progress.get(), p) {
+            last_progress.set(Some(p));
+            let progress = GenerateProgress {
+                phase: phase.to_string(),
+                progress: p,
+                operation: op.to_string(),
+            };
+            let _ = write_ipc_message(stdout, &progress);
+            let _ = stdout.flush();
+        }
+    };
+
+    let meta = run_acestep_generation::<B>(options, device, &mut progress_callback)?;
+
+    let header = GenerateResponseHeader {
+        backend,
+        channels: meta.channels,
+        frames: meta.frames,
+        guidance_scale: options.cfg_scale,
+        prompt_tokens: meta.prompt_tokens as i64,
+        sample_rate_hz: meta.sample_rate_hz,
+        length: options.length,
+        steps: meta.steps,
+    };
+
+    Ok(GeneratedOutput { header })
+}
+
+fn run_acestep_cli(options: &maolan_generate::CliOptions) -> Result<()> {
+    if options.inspect_only {
+        let model_dir = resolve_acestep_model_dir(options.model_dir.as_deref(), options.model)?;
+        let _model_paths = AceStepModelPaths::resolve(&model_dir, acestep_variant(options.model))?;
+        println!(
+            "ACE-Step 1.5 ({}) assets in {}:",
+            model_name(options.model),
+            model_dir.display()
+        );
+        for relative_path in
+            AceStepModelPaths::required_relative_files(acestep_variant(options.model))
+        {
+            println!("  {relative_path}");
+        }
+        return Ok(());
+    }
+    match options.backend {
+        BackendChoice::Cpu => {
+            let device = Default::default();
+            run_acestep_cli_with_backend::<burn::backend::NdArray<f32>>(options, &device)
+        }
+        BackendChoice::Vulkan => {
+            let device = burn::backend::wgpu::WgpuDevice::default();
+            burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
+                &device,
+                vulkan_runtime_options(),
+            );
+            run_acestep_cli_with_backend::<burn::backend::Wgpu<f32, i64, u32>>(options, &device)
+        }
+    }
+}
+
+fn run_acestep_cli_with_backend<B: Backend>(
+    options: &maolan_generate::CliOptions,
+    device: &B::Device,
+) -> Result<()> {
+    let mut progress = |phase: &str, p: f32, op: &str| {
+        if stderr_logging_enabled() {
+            eprintln!("[{phase}] {:.0}% {op}", p * 100.0);
+        }
+    };
+    let meta = run_acestep_generation::<B>(options, device, &mut progress)?;
+    println!(
+        "wrote {} ({} channels, {} frames, {} Hz)",
+        options.output_path.display(),
+        meta.channels,
+        meta.frames,
+        meta.sample_rate_hz
+    );
+    Ok(())
 }
 
 fn run_heartmula_ipc_with_backend<B: Backend>(

@@ -2111,7 +2111,8 @@ dependencies = [
 [[package]]
 name = "esaxx-rs"
 version = "0.1.10"
-source = "git+https://github.com/maolan/esaxx#327e012df843ad91d1b0ca11bdb5e78e806fc9b2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6"
 
 [[package]]
 name = "event-listener"
@@ -3392,7 +3393,7 @@ checksum = "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30"
 
 [[package]]
 name = "maolan-generate"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "burn",

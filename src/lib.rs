@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 pub mod heartcodec;
 pub mod heartmula_runtime;
 
+pub mod acestep;
+
 pub const DEFAULT_MAX_PROMPT_TOKENS: usize = 128;
 pub const DEFAULT_CFG_SCALE: f32 = 1.5;
 pub const IPC_MODE_ENV: &str = "MAOLAN_BURN_SOCKETPAIR";
@@ -31,6 +33,10 @@ pub enum ModelChoice {
     HappyNewYear,
     #[serde(rename = "RL")]
     Rl,
+    #[serde(rename = "acestep-turbo")]
+    AceStepTurbo,
+    #[serde(rename = "acestep-sft")]
+    AceStepSft,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -75,6 +81,18 @@ pub struct GenerateRequest {
 
     #[serde(default)]
     pub decoder_seed: u64,
+
+    /// Tempo in beats per minute (ACE-Step metadata conditioning).
+    #[serde(default)]
+    pub bpm: Option<f32>,
+
+    /// Musical key, e.g. "C major" or "A minor" (ACE-Step metadata conditioning).
+    #[serde(default)]
+    pub key_scale: Option<String>,
+
+    /// Time signature formatted as "N/D", e.g. "4/4" (ACE-Step metadata conditioning).
+    #[serde(default)]
+    pub time_signature: Option<String>,
 }
 
 fn default_ode_steps() -> usize {
@@ -127,7 +145,7 @@ Usage:
   maolan-generate [options] <prompt-or-lyrics>
 
 Options:
-  --model <happy-new-year|RL>
+  --model <happy-new-year|RL|acestep-turbo|acestep-sft>
   --model-dir <path>
   --output <path>
   --inspect
@@ -143,6 +161,9 @@ Options:
   --decode-only            Decode an existing frames JSON instead of generating tokens
   --frames-json <path>     Frames JSON input for --decode-only
   --decode-threads <int>    Number of worker threads for decode-only CPU decoding
+  --bpm <float>          ACE-Step: tempo in beats per minute (20-400)
+  --key-scale <text>     ACE-Step: musical key, e.g. 'C major' or 'A minor'
+  --time-signature <N/D> ACE-Step: time signature, e.g. '4/4' or '6/8'
   -h, --help
 "
 }
@@ -167,6 +188,9 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
     let mut frames_json = None;
     let mut decode_threads = None;
     let mut decoder_seed = 0_u64;
+    let mut bpm = None;
+    let mut key_scale = None;
+    let mut time_signature = None;
 
     while let Some(arg) = args.next() {
         let arg = arg
@@ -313,6 +337,39 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
             continue;
         }
 
+        if arg == "--bpm" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow!("missing value after --bpm"))?
+                .into_string()
+                .map_err(|_| anyhow!("bpm value must be valid UTF-8"))?;
+            let parsed = value
+                .parse::<f32>()
+                .map_err(|_| anyhow!("bpm must be a number"))?;
+            bpm = Some(parsed);
+            continue;
+        }
+
+        if arg == "--key-scale" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow!("missing value after --key-scale"))?
+                .into_string()
+                .map_err(|_| anyhow!("key-scale value must be valid UTF-8"))?;
+            key_scale = Some(value);
+            continue;
+        }
+
+        if arg == "--time-signature" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow!("missing value after --time-signature"))?
+                .into_string()
+                .map_err(|_| anyhow!("time-signature value must be valid UTF-8"))?;
+            time_signature = Some(value);
+            continue;
+        }
+
         if arg == "--model" {
             let value = args
                 .next()
@@ -322,8 +379,12 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
             model = match value.as_str() {
                 "happy-new-year" => ModelChoice::HappyNewYear,
                 "RL" => ModelChoice::Rl,
+                "acestep-turbo" => ModelChoice::AceStepTurbo,
+                "acestep-sft" => ModelChoice::AceStepSft,
                 _ => {
-                    bail!("unsupported model '{value}', expected one of: happy-new-year, RL")
+                    bail!(
+                        "unsupported model '{value}', expected one of: happy-new-year, RL, acestep-turbo, acestep-sft"
+                    )
                 }
             };
             continue;
@@ -398,6 +459,9 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
         frames_json,
         decode_threads,
         decoder_seed,
+        bpm,
+        key_scale,
+        time_signature,
     })
 }
 
@@ -442,7 +506,69 @@ pub fn validate_options(mut options: CliOptions) -> Result<CliOptions> {
         bail!("--decode-threads must be greater than zero");
     }
 
+    if let Some(bpm) = options.bpm
+        && (!bpm.is_finite() || !(20.0..=400.0).contains(&bpm))
+    {
+        bail!("bpm must be a finite number between 20 and 400");
+    }
+
+    options.key_scale = options
+        .key_scale
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if let Some(key_scale) = options.key_scale.as_deref() {
+        validate_key_scale(key_scale)?;
+    }
+
+    options.time_signature = options
+        .time_signature
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    if let Some(time_signature) = options.time_signature.as_deref() {
+        validate_time_signature(time_signature)?;
+    }
+
     Ok(options)
+}
+
+fn validate_key_scale(key_scale: &str) -> Result<()> {
+    let mut parts = key_scale.split_whitespace();
+    let (Some(root), Some(mode), None) = (parts.next(), parts.next(), parts.next()) else {
+        bail!("key-scale must be formatted as \"<note> <major|minor>\", e.g. \"C major\"");
+    };
+    let mut chars = root.chars();
+    let letter = chars.next().unwrap_or_default();
+    if !matches!(letter, 'A'..='G' | 'a'..='g') {
+        bail!("key-scale root must be a note letter A-G, got '{root}'");
+    }
+    let accidental: String = chars.collect();
+    if !accidental.is_empty() && accidental != "#" && accidental != "b" {
+        bail!("key-scale root may only have a '#' or 'b' accidental, got '{root}'");
+    }
+    if !matches!(mode.to_ascii_lowercase().as_str(), "major" | "minor") {
+        bail!("key-scale mode must be 'major' or 'minor', got '{mode}'");
+    }
+    Ok(())
+}
+
+fn validate_time_signature(time_signature: &str) -> Result<()> {
+    let Some((numerator, denominator)) = time_signature.split_once('/') else {
+        bail!("time-signature must be formatted as \"N/D\", e.g. \"4/4\"");
+    };
+    let numerator = numerator
+        .parse::<u8>()
+        .map_err(|_| anyhow!("time-signature numerator must be a whole number"))?;
+    let denominator = denominator
+        .parse::<u8>()
+        .map_err(|_| anyhow!("time-signature denominator must be a whole number"))?;
+    if numerator == 0 || denominator == 0 {
+        bail!("time-signature numerator and denominator must be greater than zero");
+    }
+    Ok(())
 }
 
 pub fn read_ipc_message<T: DeserializeOwned>(reader: &mut impl Read) -> Result<T> {
@@ -598,6 +724,18 @@ mod tests {
         ];
         let options = parse_options(args).expect("options should parse");
         assert_eq!(options.model, ModelChoice::Rl);
+    }
+
+    #[test]
+    fn parses_acestep_turbo_model_flag() {
+        let args = [
+            OsString::from("generate"),
+            OsString::from("--model"),
+            OsString::from("acestep-turbo"),
+            OsString::from("funky bassline"),
+        ];
+        let options = parse_options(args).expect("options should parse");
+        assert_eq!(options.model, ModelChoice::AceStepTurbo);
     }
 
     #[test]
@@ -833,6 +971,79 @@ mod tests {
     }
 
     #[test]
+    fn parses_bpm_key_scale_and_time_signature() {
+        let args = [
+            OsString::from("generate"),
+            OsString::from("--bpm"),
+            OsString::from("128"),
+            OsString::from("--key-scale"),
+            OsString::from("A minor"),
+            OsString::from("--time-signature"),
+            OsString::from("6/8"),
+            OsString::from("test prompt"),
+        ];
+        let options = parse_options(args).expect("options should parse");
+        assert_eq!(options.bpm, Some(128.0));
+        assert_eq!(options.key_scale.as_deref(), Some("A minor"));
+        assert_eq!(options.time_signature.as_deref(), Some("6/8"));
+    }
+
+    #[test]
+    fn rejects_out_of_range_bpm() {
+        for bpm in ["10", "500", "nan"] {
+            let args = [
+                OsString::from("generate"),
+                OsString::from("--bpm"),
+                OsString::from(bpm),
+                OsString::from("test prompt"),
+            ];
+            assert!(parse_options(args).is_err(), "bpm {bpm} should fail");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_key_scale() {
+        for key in ["major", "H major", "C# dorian", "C major extra", "C#"] {
+            let args = [
+                OsString::from("generate"),
+                OsString::from("--key-scale"),
+                OsString::from(key),
+                OsString::from("test prompt"),
+            ];
+            assert!(parse_options(args).is_err(), "key '{key}' should fail");
+        }
+    }
+
+    #[test]
+    fn accepts_sharp_and_flat_key_scales() {
+        for key in ["C major", "F# minor", "Bb major", "g minor"] {
+            let args = [
+                OsString::from("generate"),
+                OsString::from("--key-scale"),
+                OsString::from(key),
+                OsString::from("test prompt"),
+            ];
+            assert!(parse_options(args).is_ok(), "key '{key}' should pass");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_time_signature() {
+        for ts in ["4", "4-4", "0/4", "4/0", "x/y", "4/4/2"] {
+            let args = [
+                OsString::from("generate"),
+                OsString::from("--time-signature"),
+                OsString::from(ts),
+                OsString::from("test prompt"),
+            ];
+            assert!(
+                parse_options(args).is_err(),
+                "time signature '{ts}' should fail"
+            );
+        }
+    }
+
+    #[test]
     fn parses_lyrics_alias() {
         let args = [
             OsString::from("generate"),
@@ -890,6 +1101,9 @@ mod tests {
             frames_json: None,
             decode_threads: None,
             decoder_seed: 0,
+            bpm: None,
+            key_scale: None,
+            time_signature: None,
         };
         let validated = super::validate_options(options).expect("validation should pass");
         assert_eq!(validated.prompt, "test prompt");
@@ -915,6 +1129,9 @@ mod tests {
             frames_json: None,
             decode_threads: None,
             decoder_seed: 0,
+            bpm: None,
+            key_scale: None,
+            time_signature: None,
         };
         assert!(super::validate_options(options).is_err());
     }
@@ -939,6 +1156,9 @@ mod tests {
             frames_json: None,
             decode_threads: None,
             decoder_seed: 0,
+            bpm: None,
+            key_scale: None,
+            time_signature: None,
         };
         assert!(super::validate_options(options).is_err());
     }
@@ -963,6 +1183,9 @@ mod tests {
             frames_json: None,
             decode_threads: None,
             decoder_seed: 0,
+            bpm: None,
+            key_scale: None,
+            time_signature: None,
         };
         assert!(super::validate_options(options).is_err());
     }
@@ -987,6 +1210,9 @@ mod tests {
             frames_json: None,
             decode_threads: Some(0),
             decoder_seed: 0,
+            bpm: None,
+            key_scale: None,
+            time_signature: None,
         };
         assert!(super::validate_options(options).is_err());
     }
@@ -1011,6 +1237,9 @@ mod tests {
             frames_json: None,
             decode_threads: None,
             decoder_seed: 0,
+            bpm: None,
+            key_scale: None,
+            time_signature: None,
         };
         let validated = super::validate_options(options).expect("validation should pass");
         assert_eq!(validated.tags, Some("tag1, tag2".to_owned()));
@@ -1036,6 +1265,9 @@ mod tests {
             frames_json: None,
             decode_threads: None,
             decoder_seed: 0,
+            bpm: None,
+            key_scale: None,
+            time_signature: None,
         };
         let validated = super::validate_options(options).expect("validation should pass");
         assert_eq!(validated.tags, None);
@@ -1248,12 +1480,18 @@ mod tests {
             frames_json: None,
             decode_threads: Some(4),
             decoder_seed: 42,
+            bpm: Some(120.0),
+            key_scale: Some("A minor".to_owned()),
+            time_signature: Some("4/4".to_owned()),
         };
 
         let json = serde_json::to_string(&request).expect("serialization should succeed");
         assert!(json.contains("test prompt"));
         assert!(json.contains("cpu"));
         assert!(json.contains("RL"));
+        assert!(json.contains("A minor"));
+        assert!(json.contains("4/4"));
+        assert!(json.contains("120"));
     }
 
     #[test]

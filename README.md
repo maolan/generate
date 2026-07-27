@@ -25,6 +25,79 @@ The crate currently supports:
 - adjustable CFG scale, duration, top-k, temperature, and ODE step count
 - decode-only mode from a saved frames JSON
 - local model directory overrides or Hugging Face cache resolution
+- ACE-Step 1.5 (turbo DiT) instrumental generation with BPM, key/scale, and
+  time-signature conditioning (`--model acestep-turbo`)
+
+## ACE-Step 1.5
+
+`--model acestep-turbo` runs the turbo DiT (8 steps) with the 0.6B LM planner;
+`--model acestep-sft` runs the SFT DiT (50 steps, shift 1.0) with the 4B LM
+planner. The sampler schedule is selected automatically from `is_turbo` in the
+checkpoint config, and the planner is loaded on demand in f16 and dropped
+after planning, so peak VRAM stays around max(planner/2, everything else) —
+about 8–12 GB for the big configuration. The pipeline:
+
+1. `Qwen3-Embedding-0.6B` text encoder (causal) embeds the caption in the
+   official SFT prompt format, with the metadata block from the request.
+2. The 5 Hz LM planner (`acestep-5Hz-lm`) turns the caption plus metadata into
+   FSQ audio codes. BPM, key/scale, and time signature are injected through a
+   constructed `<think>` metadata block (the CoT generation phase is skipped
+   because the values are always known); sampling uses CFG 2.0 and top-p 0.9
+   with the official code-only mask, and the planner runs in f16.
+3. The DiT (24 layers, sliding+full attention, AdaLN) renders 25 Hz latents
+   with the LM codes as source hints — 8 Euler steps (shift 3.0) for turbo or
+   50 steps (shift 1.0) for SFT, selected from the checkpoint config.
+4. The Oobleck VAE decoder upsamples latents to 48 kHz stereo.
+
+```bash
+cargo run --release -- \
+  --model acestep-turbo \
+  --backend vulkan \
+  --bpm 128 \
+  --key-scale "A minor" \
+  --time-signature "4/4" \
+  --length 10000 \
+  --output loop.wav \
+  "dark rolling techno groove"
+```
+
+Weights are converted offline from the official safetensors checkpoints into
+BurnPack files with the bundled converter:
+
+```bash
+cargo run --release --bin acestep_convert -- \
+  --component dit --input model.safetensors --output acestep-dit.bpk
+```
+
+(`--component` is one of `text-encoder`, `lm`, `dit`, `condition`, `vae`,
+`silence`; see `acestep_convert --help`.) To download the official checkpoints
+from Hugging Face and convert them in one go (pure Rust + curl, no Python
+needed):
+
+```bash
+bin/convert_acestep.sh /path/to/out                 # 0.6B LM planner (default)
+bin/convert_acestep.sh /path/to/out --lm 1.7B       # larger planner
+bin/convert_acestep.sh /path/to/out --snapshot-dir /data/Ace-Step1.5  # local checkout
+```
+
+The pre-converted files are expected
+in a single model directory (or Hugging Face repo) as:
+
+- `qwen3-encoder.bpk`, `qwen3_config.json`, `tokenizer.json`
+- `acestep-lm.bpk`, `lm_config.json`, `lm_tokenizer.json`
+- `acestep-dit.bpk`, `dit_config.json`
+- `acestep-condition.bpk`
+- `acestep-vae.bpk`, `vae_config.json`
+- `silence_latent.bpk`
+
+Like the HeartMuLa burn repos (which vendor their own `convert.sh` and
+exporter sources), `maolandaw/ACE-Step-1.5-burn` should be published with
+`src/bin/acestep_convert.rs` and `bin/convert_acestep.sh` copied in, so the
+repo stays self-describing.
+
+Lyrics/vocal conditioning is out of scope: the lyric encoder always receives a
+single dummy token, and generation is instrumental only.
+
 
 ## Model assets
 

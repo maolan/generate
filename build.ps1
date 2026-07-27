@@ -8,7 +8,6 @@ $target    = "x86_64-pc-windows-msvc"
 $targetDir = "C:\cargo-target"
 $nsisPath  = "C:\nsis-3.10\makensis.exe"
 $staging   = "C:\maolan-staging\generate"
-$vcpkgRoot = "C:\vcpkg"
 
 # ---------------------------------------------------------------------------
 # Elevation check
@@ -17,7 +16,7 @@ $currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Pri
 $isAdmin = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
     Write-Warning "This script is NOT running as Administrator."
-    Write-Warning "Most installations (VS Build Tools, LLVM, NSIS to C:\, vcpkg) require elevation."
+    Write-Warning "Most installations (VS Build Tools, NSIS to C:\) require elevation."
     Write-Warning "If installs fail, run PowerShell as Administrator or execute from an RDP/VNC session."
     Write-Host ""
 }
@@ -138,71 +137,6 @@ function Ensure-NSIS {
     }
 }
 
-function Ensure-Vcpkg {
-    $vcpkgExe = "$vcpkgRoot\vcpkg.exe"
-    if (Test-Path $vcpkgExe) {
-        Write-Host "vcpkg already bootstrapped."
-        return $vcpkgRoot
-    }
-    Write-Host "Bootstrapping vcpkg..."
-    if (-not (Test-Path $vcpkgRoot)) {
-        & "$env:ProgramFiles\Git\cmd\git.exe" clone https://github.com/microsoft/vcpkg $vcpkgRoot
-    }
-    & "$vcpkgRoot\bootstrap-vcpkg.bat" | Out-Null
-    if (-not (Test-Path $vcpkgExe)) {
-        Write-Error "Failed to bootstrap vcpkg."
-    }
-    return $vcpkgRoot
-}
-
-function Install-VcpkgPackage {
-    param([string]$Root, [string]$Package)
-    $name = $Package.Split(":")[0]
-    $list = & { $ErrorActionPreference = "Continue"; & "$Root\vcpkg.exe" list $name } 2>$null
-    if ($list -match "^$name\b") {
-        Write-Host "$Package is already installed."
-        return
-    }
-    Write-Host "Installing $Package via vcpkg (first run may take a long time)..."
-    & "$Root\vcpkg.exe" install $Package
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "vcpkg install $Package failed"
-    }
-}
-
-function Ensure-LLVM {
-    $llvmPaths = @(
-        "C:\LLVM\bin"
-        "$env:ProgramFiles\LLVM\bin"
-        "$env:ProgramFiles(x86)\LLVM\bin"
-    )
-    foreach ($path in $llvmPaths) {
-        if (Test-Path "$path\libclang.dll") {
-            $env:LIBCLANG_PATH = $path
-            Write-Host "Found libclang at $path"
-            return
-        }
-    }
-    Write-Host "Installing LLVM..."
-    $installer = "$env:TEMP\LLVM-installer.exe"
-    if (-not (Test-Path $installer)) {
-        Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.0/LLVM-19.1.0-win64.exe" -OutFile $installer
-    }
-    Start-Process -FilePath $installer -ArgumentList "/S" -Wait
-    # Some installers need a moment to finish writing files even after the process exits
-    for ($i = 0; $i -lt 10; $i++) {
-        foreach ($path in $llvmPaths) {
-            if (Test-Path "$path\libclang.dll") {
-                $env:LIBCLANG_PATH = $path
-                Write-Host "Found libclang at $path after installation"
-                return
-            }
-        }
-        Start-Sleep -Seconds 2
-    }
-    Write-Error "LLVM installation completed but libclang.dll was not found."
-}
-
 # ---------------------------------------------------------------------------
 # Main flow
 # ---------------------------------------------------------------------------
@@ -211,17 +145,6 @@ Import-VSEnv
 Ensure-Rust
 Ensure-NSIS
 Ensure-Git
-$vcpkgRoot = Ensure-Vcpkg
-Install-VcpkgPackage $vcpkgRoot "sentencepiece:x64-windows"
-Ensure-LLVM
-
-# ---------------------------------------------------------------------------
-# Environment
-# ---------------------------------------------------------------------------
-$env:VCPKG_ROOT = $vcpkgRoot
-# Append vcpkg paths to existing VS environment paths (don't overwrite)
-$env:LIB     = "$vcpkgRoot\installed\x64-windows\lib;$env:LIB"
-$env:INCLUDE = "$vcpkgRoot\installed\x64-windows\include;$env:INCLUDE"
 
 # ---------------------------------------------------------------------------
 # VC++ Redistributable
