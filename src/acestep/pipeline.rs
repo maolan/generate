@@ -28,6 +28,7 @@ use super::dit::{AceStepDiT, SFT_TIMESTEPS, TURBO_TIMESTEPS};
 use super::lm::{self, AceStepLm, AudioCodeVocab, SamplingConfig};
 use super::qwen3::{Qwen3Config, Qwen3Model};
 use super::vae::{OobleckDecoder, OobleckVaeConfig};
+use crate::AceStepLmSize;
 
 /// Number of 25Hz latent frames used as the timbre reference
 /// (`timbre_fix_frame` of the released checkpoint).
@@ -52,6 +53,16 @@ impl AceStepVariant {
     }
 }
 
+impl AceStepLmSize {
+    fn turbo_suffix(self) -> &'static str {
+        match self {
+            Self::B0_6 => "",
+            Self::B1_7 => "-1.7b",
+            Self::B4 => "-4b",
+        }
+    }
+}
+
 /// Model-file layout of one ACE-Step model directory.
 ///
 /// Shared files (both variants): `qwen3-encoder.bpk`, `qwen3_config.json`,
@@ -67,11 +78,11 @@ pub struct AceStepModelPaths {
     pub text_encoder_bpk: PathBuf,
     /// `qwen3_config.json` — text encoder config.
     pub text_encoder_config: PathBuf,
-    /// `<prefix>acestep-lm.bpk` — 5Hz LM planner weights.
+    /// 5Hz LM planner weights.
     pub lm_bpk: PathBuf,
-    /// `<prefix>lm_config.json` — LM planner config.
+    /// LM planner config.
     pub lm_config: PathBuf,
-    /// `<prefix>lm_tokenizer.json` — LM planner tokenizer (holds the audio codes).
+    /// LM planner tokenizer (holds the audio codes).
     pub lm_tokenizer: PathBuf,
     /// `<prefix>acestep-dit.bpk` — DiT weights.
     pub dit_bpk: PathBuf,
@@ -127,16 +138,52 @@ impl AceStepModelPaths {
         }
     }
 
+    pub fn required_relative_files_for_lm(
+        variant: AceStepVariant,
+        lm_size: AceStepLmSize,
+    ) -> Vec<&'static str> {
+        let mut files = Self::required_relative_files(variant).to_vec();
+        if variant == AceStepVariant::Turbo {
+            match lm_size {
+                AceStepLmSize::B0_6 => {}
+                AceStepLmSize::B1_7 => {
+                    files[6] = "acestep-lm-1.7b.bpk";
+                    files[7] = "lm_config-1.7b.json";
+                    files[8] = "lm_tokenizer-1.7b.json";
+                }
+                AceStepLmSize::B4 => {
+                    files[6] = "acestep-lm-4b.bpk";
+                    files[7] = "lm_config-4b.json";
+                    files[8] = "lm_tokenizer-4b.json";
+                }
+            }
+        }
+        files
+    }
+
     /// Resolve every required file inside `model_dir` for `variant`, failing
     /// with a clear error that lists the missing relative paths.
     pub fn resolve(model_dir: &Path, variant: AceStepVariant) -> Result<Self> {
+        Self::resolve_for_lm(model_dir, variant, AceStepLmSize::default())
+    }
+
+    pub fn resolve_for_lm(
+        model_dir: &Path,
+        variant: AceStepVariant,
+        lm_size: AceStepLmSize,
+    ) -> Result<Self> {
         let prefix = variant.prefix();
+        let lm_suffix = if variant == AceStepVariant::Turbo {
+            lm_size.turbo_suffix()
+        } else {
+            ""
+        };
         let paths = Self {
             text_encoder_bpk: model_dir.join("qwen3-encoder.bpk"),
             text_encoder_config: model_dir.join("qwen3_config.json"),
-            lm_bpk: model_dir.join(format!("{prefix}acestep-lm.bpk")),
-            lm_config: model_dir.join(format!("{prefix}lm_config.json")),
-            lm_tokenizer: model_dir.join(format!("{prefix}lm_tokenizer.json")),
+            lm_bpk: model_dir.join(format!("{prefix}acestep-lm{lm_suffix}.bpk")),
+            lm_config: model_dir.join(format!("{prefix}lm_config{lm_suffix}.json")),
+            lm_tokenizer: model_dir.join(format!("{prefix}lm_tokenizer{lm_suffix}.json")),
             dit_bpk: model_dir.join(format!("{prefix}acestep-dit.bpk")),
             dit_config: model_dir.join(format!("{prefix}dit_config.json")),
             condition_bpk: model_dir.join(format!("{prefix}acestep-condition.bpk")),
@@ -145,8 +192,8 @@ impl AceStepModelPaths {
             silence_latent_bpk: model_dir.join("silence_latent.bpk"),
             tokenizer_json: model_dir.join("tokenizer.json"),
         };
-        let relative = Self::required_relative_files(variant);
-        let missing: Vec<&'static str> = relative
+        let relative = Self::required_relative_files_for_lm(variant, lm_size);
+        let missing: Vec<&str> = relative
             .iter()
             .copied()
             .zip(paths.all_absolute())
@@ -910,6 +957,25 @@ mod tests {
             INSTRUMENTAL_LYRIC_PROMPT,
             "# Languages\nunknown\n\n# Lyric\n[Instrumental]<|endoftext|>"
         );
+    }
+
+    #[test]
+    fn turbo_lm_size_selects_suffixed_files() {
+        let files = AceStepModelPaths::required_relative_files_for_lm(
+            AceStepVariant::Turbo,
+            AceStepLmSize::B1_7,
+        );
+        assert!(files.contains(&"acestep-lm-1.7b.bpk"));
+        assert!(files.contains(&"lm_config-1.7b.json"));
+        assert!(files.contains(&"lm_tokenizer-1.7b.json"));
+
+        let files = AceStepModelPaths::required_relative_files_for_lm(
+            AceStepVariant::Turbo,
+            AceStepLmSize::B4,
+        );
+        assert!(files.contains(&"acestep-lm-4b.bpk"));
+        assert!(files.contains(&"lm_config-4b.json"));
+        assert!(files.contains(&"lm_tokenizer-4b.json"));
     }
 
     #[test]

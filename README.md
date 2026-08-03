@@ -75,8 +75,7 @@ from Hugging Face and convert them in one go (pure Rust + curl, no Python
 needed):
 
 ```bash
-bin/convert_acestep.sh /path/to/out                 # 0.6B LM planner (default)
-bin/convert_acestep.sh /path/to/out --lm 1.7B       # larger planner
+bin/convert_acestep.sh /path/to/out                 # converts all turbo LM planners
 bin/convert_acestep.sh /path/to/out --snapshot-dir /data/Ace-Step1.5  # local checkout
 ```
 
@@ -89,6 +88,12 @@ in a single model directory (or Hugging Face repo) as:
 - `acestep-condition.bpk`
 - `acestep-vae.bpk`, `vae_config.json`
 - `silence_latent.bpk`
+
+The converter writes all turbo LM planners. The 0.6B planner keeps the
+unsuffixed names above. The larger planners are written as
+`acestep-lm-1.7b.bpk` / `lm_config-1.7b.json` / `lm_tokenizer-1.7b.json` and
+`acestep-lm-4b.bpk` / `lm_config-4b.json` / `lm_tokenizer-4b.json`. Select one
+at runtime with `--acestep-lm 0.6B`, `--acestep-lm 1.7B`, or `--acestep-lm 4B`.
 
 Like the HeartMuLa burn repos (which vendor their own `convert.sh` and
 exporter sources), `maolandaw/ACE-Step-1.5-burn` should be published with

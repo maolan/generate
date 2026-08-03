@@ -39,6 +39,17 @@ pub enum ModelChoice {
     AceStepSft,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum AceStepLmSize {
+    #[serde(rename = "0.6B")]
+    #[default]
+    B0_6,
+    #[serde(rename = "1.7B")]
+    B1_7,
+    #[serde(rename = "4B")]
+    B4,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct GenerateRequest {
     #[serde(default)]
@@ -93,6 +104,10 @@ pub struct GenerateRequest {
     /// Time signature formatted as "N/D", e.g. "4/4" (ACE-Step metadata conditioning).
     #[serde(default)]
     pub time_signature: Option<String>,
+
+    /// ACE-Step turbo 5 Hz LM planner size.
+    #[serde(default)]
+    pub acestep_lm: AceStepLmSize,
 }
 
 fn default_ode_steps() -> usize {
@@ -164,6 +179,7 @@ Options:
   --bpm <float>          ACE-Step: tempo in beats per minute (20-400)
   --key-scale <text>     ACE-Step: musical key, e.g. 'C major' or 'A minor'
   --time-signature <N/D> ACE-Step: time signature, e.g. '4/4' or '6/8'
+  --acestep-lm <0.6B|1.7B|4B>
   -h, --help
 "
 }
@@ -191,6 +207,7 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
     let mut bpm = None;
     let mut key_scale = None;
     let mut time_signature = None;
+    let mut acestep_lm = AceStepLmSize::default();
 
     while let Some(arg) = args.next() {
         let arg = arg
@@ -370,6 +387,16 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
             continue;
         }
 
+        if arg == "--acestep-lm" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow!("missing value after --acestep-lm"))?
+                .into_string()
+                .map_err(|_| anyhow!("acestep-lm value must be valid UTF-8"))?;
+            acestep_lm = parse_acestep_lm_size(&value)?;
+            continue;
+        }
+
         if arg == "--model" {
             let value = args
                 .next()
@@ -462,7 +489,17 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
         bpm,
         key_scale,
         time_signature,
+        acestep_lm,
     })
+}
+
+fn parse_acestep_lm_size(value: &str) -> Result<AceStepLmSize> {
+    match value {
+        "0.6B" | "0.6b" => Ok(AceStepLmSize::B0_6),
+        "1.7B" | "1.7b" => Ok(AceStepLmSize::B1_7),
+        "4B" | "4b" => Ok(AceStepLmSize::B4),
+        _ => bail!("unsupported --acestep-lm '{value}', expected one of: 0.6B, 1.7B, 4B"),
+    }
 }
 
 pub fn validate_options(mut options: CliOptions) -> Result<CliOptions> {
@@ -660,7 +697,9 @@ pub fn encode_prompt(
 
 #[cfg(test)]
 mod tests {
-    use super::{BackendChoice, DEFAULT_MAX_PROMPT_TOKENS, ModelChoice, parse_options};
+    use super::{
+        AceStepLmSize, BackendChoice, DEFAULT_MAX_PROMPT_TOKENS, ModelChoice, parse_options,
+    };
     use std::ffi::OsString;
 
     #[test]
@@ -989,6 +1028,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_acestep_lm_size() {
+        let args = [
+            OsString::from("generate"),
+            OsString::from("--model"),
+            OsString::from("acestep-turbo"),
+            OsString::from("--acestep-lm"),
+            OsString::from("1.7B"),
+            OsString::from("test prompt"),
+        ];
+        let options = parse_options(args).expect("options should parse");
+        assert_eq!(options.acestep_lm, AceStepLmSize::B1_7);
+    }
+
+    #[test]
+    fn rejects_unknown_acestep_lm_size() {
+        let args = [
+            OsString::from("generate"),
+            OsString::from("--acestep-lm"),
+            OsString::from("2B"),
+            OsString::from("test prompt"),
+        ];
+        assert!(parse_options(args).is_err());
+    }
+
+    #[test]
     fn rejects_out_of_range_bpm() {
         for bpm in ["10", "500", "nan"] {
             let args = [
@@ -1104,6 +1168,7 @@ mod tests {
             bpm: None,
             key_scale: None,
             time_signature: None,
+            acestep_lm: AceStepLmSize::default(),
         };
         let validated = super::validate_options(options).expect("validation should pass");
         assert_eq!(validated.prompt, "test prompt");
@@ -1132,6 +1197,7 @@ mod tests {
             bpm: None,
             key_scale: None,
             time_signature: None,
+            acestep_lm: AceStepLmSize::default(),
         };
         assert!(super::validate_options(options).is_err());
     }
@@ -1159,6 +1225,7 @@ mod tests {
             bpm: None,
             key_scale: None,
             time_signature: None,
+            acestep_lm: AceStepLmSize::default(),
         };
         assert!(super::validate_options(options).is_err());
     }
@@ -1186,6 +1253,7 @@ mod tests {
             bpm: None,
             key_scale: None,
             time_signature: None,
+            acestep_lm: AceStepLmSize::default(),
         };
         assert!(super::validate_options(options).is_err());
     }
@@ -1213,6 +1281,7 @@ mod tests {
             bpm: None,
             key_scale: None,
             time_signature: None,
+            acestep_lm: AceStepLmSize::default(),
         };
         assert!(super::validate_options(options).is_err());
     }
@@ -1240,6 +1309,7 @@ mod tests {
             bpm: None,
             key_scale: None,
             time_signature: None,
+            acestep_lm: AceStepLmSize::default(),
         };
         let validated = super::validate_options(options).expect("validation should pass");
         assert_eq!(validated.tags, Some("tag1, tag2".to_owned()));
@@ -1268,6 +1338,7 @@ mod tests {
             bpm: None,
             key_scale: None,
             time_signature: None,
+            acestep_lm: AceStepLmSize::default(),
         };
         let validated = super::validate_options(options).expect("validation should pass");
         assert_eq!(validated.tags, None);
@@ -1483,6 +1554,7 @@ mod tests {
             bpm: Some(120.0),
             key_scale: Some("A minor".to_owned()),
             time_signature: Some("4/4".to_owned()),
+            acestep_lm: AceStepLmSize::B1_7,
         };
 
         let json = serde_json::to_string(&request).expect("serialization should succeed");

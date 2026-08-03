@@ -8,8 +8,8 @@ use maolan_generate::acestep::{
 use maolan_generate::heartcodec;
 use maolan_generate::heartmula_runtime;
 use maolan_generate::{
-    BackendChoice, GenerateError, GenerateProgress, GenerateResponseHeader, IPC_MODE_ENV,
-    ModelChoice, help_text, parse_options, read_ipc_message, stderr_logging_enabled,
+    AceStepLmSize, BackendChoice, GenerateError, GenerateProgress, GenerateResponseHeader,
+    IPC_MODE_ENV, ModelChoice, help_text, parse_options, read_ipc_message, stderr_logging_enabled,
     validate_options, write_ipc_message,
 };
 use std::collections::BTreeMap;
@@ -469,6 +469,7 @@ fn ensure_heartmula_model_paths(paths: &HeartmulaModelPaths) -> Result<()> {
 fn resolve_acestep_model_dir(
     model_dir_override: Option<&Path>,
     model: ModelChoice,
+    lm_size: AceStepLmSize,
 ) -> Result<PathBuf> {
     match model_dir_override {
         Some(model_dir) => Ok(model_dir.to_path_buf()),
@@ -477,8 +478,16 @@ fn resolve_acestep_model_dir(
                 ModelChoice::AceStepSft => (ACESTEP_SFT_REPO_ID, AceStepVariant::Sft),
                 _ => (ACESTEP_REPO_ID, AceStepVariant::Turbo),
             };
-            ensure_repo_snapshot_dir(repo_id, AceStepModelPaths::required_relative_files(variant))
+            let required = AceStepModelPaths::required_relative_files_for_lm(variant, lm_size);
+            ensure_repo_snapshot_dir(repo_id, &required)
         }
+    }
+}
+
+fn acestep_lm_size(options: &maolan_generate::CliOptions) -> AceStepLmSize {
+    match options.model {
+        ModelChoice::AceStepSft => AceStepLmSize::B4,
+        _ => options.acestep_lm,
     }
 }
 
@@ -487,8 +496,11 @@ fn run_acestep_generation<B: Backend>(
     device: &B::Device,
     progress: &mut dyn FnMut(&str, f32, &str),
 ) -> Result<GenerateAudioMeta> {
-    let model_dir = resolve_acestep_model_dir(options.model_dir.as_deref(), options.model)?;
-    let model_paths = AceStepModelPaths::resolve(&model_dir, acestep_variant(options.model))?;
+    let lm_size = acestep_lm_size(options);
+    let model_dir =
+        resolve_acestep_model_dir(options.model_dir.as_deref(), options.model, lm_size)?;
+    let model_paths =
+        AceStepModelPaths::resolve_for_lm(&model_dir, acestep_variant(options.model), lm_size)?;
     let pipeline = AceStepPipeline::<B>::load(&model_paths, device, &mut *progress)?;
     let metadata = GenerateMetadata {
         bpm: options.bpm,
@@ -569,16 +581,20 @@ fn run_acestep_ipc_with_backend<B: Backend>(
 
 fn run_acestep_cli(options: &maolan_generate::CliOptions) -> Result<()> {
     if options.inspect_only {
-        let model_dir = resolve_acestep_model_dir(options.model_dir.as_deref(), options.model)?;
-        let _model_paths = AceStepModelPaths::resolve(&model_dir, acestep_variant(options.model))?;
+        let lm_size = acestep_lm_size(options);
+        let model_dir =
+            resolve_acestep_model_dir(options.model_dir.as_deref(), options.model, lm_size)?;
+        let _model_paths =
+            AceStepModelPaths::resolve_for_lm(&model_dir, acestep_variant(options.model), lm_size)?;
         println!(
             "ACE-Step 1.5 ({}) assets in {}:",
             model_name(options.model),
             model_dir.display()
         );
-        for relative_path in
-            AceStepModelPaths::required_relative_files(acestep_variant(options.model))
-        {
+        for relative_path in AceStepModelPaths::required_relative_files_for_lm(
+            acestep_variant(options.model),
+            lm_size,
+        ) {
             println!("  {relative_path}");
         }
         return Ok(());
