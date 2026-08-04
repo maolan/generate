@@ -6,7 +6,7 @@
 //! produces the same AMT token format.
 
 use super::amt::{AmtEvent, MAX_DUR, MAX_TIME, TIME_RESOLUTION};
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 

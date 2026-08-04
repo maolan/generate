@@ -9,9 +9,10 @@ use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig, LinearLayout};
 use burn::prelude::Backend;
 use burn::tensor::{DType, Int, Tensor, TensorData};
 use burn_store::{BurnpackStore, ModuleSnapshot, ModuleStore};
+use oxideav_core::{
+    CodecId, CodecParameters, MediaType, Packet, RuntimeContext, SampleFormat, StreamInfo, TimeBase,
+};
 use rayon::prelude::*;
-use std::fs::File;
-use std::io::{BufWriter, Write};
 
 pub use conv::PostProcessor;
 pub use conv::{PlainConv1d, WNConv1d, WNConvTranspose1d};
@@ -2408,12 +2409,8 @@ impl<B: Backend> PReLU<B> {
 }
 
 pub fn write_wav_from_f32(samples: &[f32], sample_rate: u32, path: &std::path::Path) -> Result<()> {
-    write_wav_float32_impl(samples.len(), 1, sample_rate, path, |bytes| {
-        bytes
-            .par_chunks_mut(std::mem::size_of::<f32>())
-            .zip(samples.par_iter())
-            .for_each(|(chunk, sample)| chunk.copy_from_slice(&sample.to_le_bytes()));
-    })
+    write_wav_f32_oxideav(path, samples, 1, sample_rate)
+        .with_context(|| format!("failed to write mono WAV to {}", path.display()))
 }
 
 pub fn write_wav_from_f32_interleaved(
@@ -2426,105 +2423,81 @@ pub fn write_wav_from_f32_interleaved(
     let sample_count = channels
         .checked_mul(frames)
         .context("interleaved float WAV sample count overflow")?;
-    write_wav_float32_impl(sample_count, channels, sample_rate, path, |bytes| {
-        bytes
-            .par_chunks_mut(std::mem::size_of::<f32>())
-            .enumerate()
-            .for_each(|(sample_index, chunk)| {
-                let frame = sample_index / channels;
-                let channel = sample_index % channels;
-                let source_index = channel
-                    .checked_mul(frames)
-                    .and_then(|base| base.checked_add(frame))
-                    .unwrap_or(0);
-                let sample = samples.get(source_index).copied().unwrap_or_default();
-                chunk.copy_from_slice(&sample.to_le_bytes());
-            });
-    })
+    let mut interleaved = vec![0.0_f32; sample_count];
+    interleaved
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(sample_index, slot)| {
+            let frame = sample_index / channels;
+            let channel = sample_index % channels;
+            let source_index = channel
+                .checked_mul(frames)
+                .and_then(|base| base.checked_add(frame))
+                .unwrap_or(0);
+            *slot = samples.get(source_index).copied().unwrap_or_default();
+        });
+    write_wav_f32_oxideav(path, &interleaved, channels, sample_rate)
+        .with_context(|| format!("failed to write interleaved WAV to {}", path.display()))
 }
 
-fn write_wav_float32_impl(
-    sample_count: usize,
+fn write_wav_f32_oxideav(
+    path: &std::path::Path,
+    samples: &[f32],
     channels: usize,
     sample_rate: u32,
-    path: &std::path::Path,
-    fill_payload: impl FnOnce(&mut [u8]),
-) -> Result<()> {
-    let channels = u16::try_from(channels).context("float WAV channel count exceeds u16")?;
-    let bits_per_sample = 32_u16;
-    let bytes_per_sample = usize::from(bits_per_sample / 8);
-    let data_bytes = sample_count
-        .checked_mul(bytes_per_sample)
-        .context("float WAV payload size overflow")?;
-    let riff_chunk_size = 36_u32
-        .checked_add(u32::try_from(data_bytes).context("float WAV payload exceeds RIFF size")?)
-        .context("float WAV RIFF chunk size overflow")?;
-    let byte_rate = sample_rate
-        .checked_mul(u32::from(channels))
-        .and_then(|value| value.checked_mul(u32::from(bits_per_sample / 8)))
-        .context("float WAV byte rate overflow")?;
-    let block_align = channels
-        .checked_mul(bits_per_sample / 8)
-        .context("float WAV block align overflow")?;
+) -> std::io::Result<()> {
+    let channels = channels.max(1);
+    if sample_rate == 0 {
+        return Err(std::io::Error::other(
+            "write_wav_f32: sample_rate must be > 0",
+        ));
+    }
+    if channels > 8 {
+        return Err(std::io::Error::other(format!(
+            "write_wav_f32: channel count {channels} exceeds the supported maximum of 8"
+        )));
+    }
+    if !samples.len().is_multiple_of(channels) {
+        return Err(std::io::Error::other(
+            "write_wav_f32: sample slice length is not a multiple of channels",
+        ));
+    }
 
-    let file = File::create(path)
-        .with_context(|| format!("failed to create WAV writer for {}", path.display()))?;
-    let mut writer = BufWriter::new(file);
+    let mut ctx = RuntimeContext::new();
+    oxideav_basic::register(&mut ctx);
 
-    writer
-        .write_all(b"RIFF")
-        .with_context(|| "failed to write WAV RIFF header")?;
-    writer
-        .write_all(&riff_chunk_size.to_le_bytes())
-        .with_context(|| "failed to write WAV RIFF size")?;
-    writer
-        .write_all(b"WAVE")
-        .with_context(|| "failed to write WAV format header")?;
-    writer
-        .write_all(b"fmt ")
-        .with_context(|| "failed to write WAV fmt chunk")?;
-    writer
-        .write_all(&16_u32.to_le_bytes())
-        .with_context(|| "failed to write WAV fmt size")?;
-    writer
-        .write_all(&3_u16.to_le_bytes())
-        .with_context(|| "failed to write WAV float format code")?;
-    writer
-        .write_all(&channels.to_le_bytes())
-        .with_context(|| "failed to write WAV channel count")?;
-    writer
-        .write_all(&sample_rate.to_le_bytes())
-        .with_context(|| "failed to write WAV sample rate")?;
-    writer
-        .write_all(&byte_rate.to_le_bytes())
-        .with_context(|| "failed to write WAV byte rate")?;
-    writer
-        .write_all(&block_align.to_le_bytes())
-        .with_context(|| "failed to write WAV block align")?;
-    writer
-        .write_all(&bits_per_sample.to_le_bytes())
-        .with_context(|| "failed to write WAV bits per sample")?;
-    writer
-        .write_all(b"data")
-        .with_context(|| "failed to write WAV data chunk tag")?;
-    writer
-        .write_all(
-            &u32::try_from(data_bytes)
-                .context("float WAV data section exceeds RIFF size")?
-                .to_le_bytes(),
-        )
-        .with_context(|| "failed to write WAV data size")?;
+    let stream = wav_f32_stream_info(channels, sample_rate);
+    let file = std::fs::File::create(path)?;
+    let output: Box<dyn oxideav_core::WriteSeek> = Box::new(file);
+    let mut mux = ctx
+        .containers
+        .open_muxer("wav", output, std::slice::from_ref(&stream))
+        .map_err(|e| std::io::Error::other(format!("OxideAV error: {e}")))?;
+    mux.write_header()
+        .map_err(|e| std::io::Error::other(format!("OxideAV error: {e}")))?;
 
-    let mut payload = vec![0_u8; data_bytes];
-    fill_payload(&mut payload);
-    writer
-        .write_all(&payload)
-        .with_context(|| "failed to write WAV float payload")?;
-    writer
-        .flush()
-        .with_context(|| "failed to finalize WAV file")?;
-
+    let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let packet = Packet::new(0, TimeBase::new(1, sample_rate as i64), bytes);
+    mux.write_packet(&packet)
+        .map_err(|e| std::io::Error::other(format!("OxideAV error: {e}")))?;
+    mux.write_trailer()
+        .map_err(|e| std::io::Error::other(format!("OxideAV error: {e}")))?;
     Ok(())
+}
+
+fn wav_f32_stream_info(channels: usize, sample_rate: u32) -> StreamInfo {
+    let mut params = CodecParameters::audio(CodecId::new("pcm_f32le"));
+    params.media_type = MediaType::Audio;
+    params.channels = Some(channels as u16);
+    params.sample_rate = Some(sample_rate);
+    params.sample_format = Some(SampleFormat::F32);
+    StreamInfo {
+        index: 0,
+        time_base: TimeBase::new(1, sample_rate as i64),
+        duration: None,
+        start_time: Some(0),
+        params,
+    }
 }
 
 pub fn frames_to_tensor<B: Backend>(frames: &[Vec<i64>], device: &B::Device) -> Tensor<B, 3, Int> {
@@ -2661,22 +2634,106 @@ mod tests {
         std::env::temp_dir().join(format!("maolan_{name}_{nanos}.wav"))
     }
 
+    #[derive(Debug, Clone)]
+    struct WavInfo {
+        channels: u16,
+        sample_rate: u32,
+        bits_per_sample: u16,
+        is_float: bool,
+        samples: Vec<f32>,
+    }
+
+    fn read_wav_f32(path: &std::path::Path) -> WavInfo {
+        use symphonia::core::audio::SampleBuffer;
+        use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
+        use symphonia::core::errors::Error as SymphoniaError;
+        use symphonia::core::formats::FormatOptions;
+        use symphonia::core::io::MediaSourceStream;
+        use symphonia::core::meta::MetadataOptions;
+        use symphonia::core::probe::Hint;
+
+        let file = std::fs::File::open(path).expect("open wav");
+        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        let mut hint = Hint::new();
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            hint.with_extension(ext);
+        }
+        let probed = symphonia::default::get_probe()
+            .format(
+                &hint,
+                mss,
+                &FormatOptions::default(),
+                &MetadataOptions::default(),
+            )
+            .expect("probe wav");
+        let mut format = probed.format;
+        let track = format
+            .tracks()
+            .iter()
+            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            .or_else(|| format.tracks().first())
+            .expect("audio track");
+        let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
+        let sample_rate = track.codec_params.sample_rate.unwrap_or(48_000);
+        let bits_per_sample = track.codec_params.bits_per_sample.unwrap_or(32);
+        let sample_format = track.codec_params.sample_format;
+        let is_float = sample_format
+            .map(|f| {
+                matches!(
+                    f,
+                    symphonia::core::sample::SampleFormat::F32
+                        | symphonia::core::sample::SampleFormat::F64
+                )
+            })
+            .unwrap_or(true);
+        let track_id = track.id;
+        let mut decoder = symphonia::default::get_codecs()
+            .make(&track.codec_params, &DecoderOptions::default())
+            .expect("create decoder");
+        let mut sample_buf = None;
+        let mut samples = Vec::new();
+        loop {
+            let packet = match format.next_packet() {
+                Ok(packet) => packet,
+                Err(SymphoniaError::IoError(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    break;
+                }
+                Err(e) => panic!("read error: {e}"),
+            };
+            if packet.track_id() != track_id {
+                continue;
+            }
+            let decoded = decoder.decode(&packet).expect("decode packet");
+            if sample_buf.is_none() {
+                let spec = *decoded.spec();
+                sample_buf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
+            }
+            let buf = sample_buf.as_mut().unwrap();
+            buf.copy_interleaved_ref(decoded);
+            samples.extend_from_slice(buf.samples());
+        }
+        WavInfo {
+            channels: channels as u16,
+            sample_rate,
+            bits_per_sample: bits_per_sample as u16,
+            is_float,
+            samples,
+        }
+    }
+
     #[test]
     fn writes_mono_wav_as_f32() {
         let path = temp_wav_path("mono_f32");
         write_wav_from_f32(&[0.25, -0.5, 1.25], 48_000, &path).expect("write mono wav");
 
-        let mut reader = hound::WavReader::open(&path).expect("open mono wav");
-        let spec = reader.spec();
-        assert_eq!(spec.channels, 1);
-        assert_eq!(spec.sample_rate, 48_000);
-        assert_eq!(spec.bits_per_sample, 32);
-        assert_eq!(spec.sample_format, hound::SampleFormat::Float);
-        let samples: Vec<f32> = reader
-            .samples::<f32>()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("read mono float samples");
-        assert_eq!(samples, vec![0.25, -0.5, 1.25]);
+        let info = read_wav_f32(&path);
+        assert_eq!(info.channels, 1);
+        assert_eq!(info.sample_rate, 48_000);
+        assert_eq!(info.bits_per_sample, 32);
+        assert!(info.is_float);
+        assert_eq!(info.samples, vec![0.25, -0.5, 1.25]);
 
         std::fs::remove_file(&path).expect("remove mono wav");
     }
@@ -2688,17 +2745,12 @@ mod tests {
         write_wav_from_f32_interleaved(&planar_samples, 2, 3, 48_000, &path)
             .expect("write stereo wav");
 
-        let mut reader = hound::WavReader::open(&path).expect("open stereo wav");
-        let spec = reader.spec();
-        assert_eq!(spec.channels, 2);
-        assert_eq!(spec.sample_rate, 48_000);
-        assert_eq!(spec.bits_per_sample, 32);
-        assert_eq!(spec.sample_format, hound::SampleFormat::Float);
-        let samples: Vec<f32> = reader
-            .samples::<f32>()
-            .collect::<Result<Vec<_>, _>>()
-            .expect("read stereo float samples");
-        assert_eq!(samples, vec![0.1, -0.1, 0.2, -0.2, 0.3, -0.3]);
+        let info = read_wav_f32(&path);
+        assert_eq!(info.channels, 2);
+        assert_eq!(info.sample_rate, 48_000);
+        assert_eq!(info.bits_per_sample, 32);
+        assert!(info.is_float);
+        assert_eq!(info.samples, vec![0.1, -0.1, 0.2, -0.2, 0.3, -0.3]);
 
         std::fs::remove_file(&path).expect("remove stereo wav");
     }

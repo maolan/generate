@@ -28,7 +28,7 @@ use burn::prelude::Backend;
 use burn::tensor::{DType, Int, Tensor, TensorData};
 use burn_store::ModuleStore;
 use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 use super::qwen3::{Qwen3Config, Qwen3Model};
 
