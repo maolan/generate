@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Maolan Generate
+Comment=Maolan AI Music Generation CLI
+Exec=maolan-generate
+Icon=maolan-generate-icon
+Type=Application
+Terminal=true
+Categories=AudioVideo;Audio;

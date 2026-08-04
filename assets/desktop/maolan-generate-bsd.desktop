@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Maolan Generate
+Comment=Maolan AI Music Generation CLI
+GenericName=AI Music Generator
+Exec=/usr/local/bin/maolan-generate
+Icon=/usr/local/share/icons/hicolor/scalable/apps/maolan-generate-icon.svg
+Terminal=true
+Categories=AudioVideo;Audio;Music;
+Keywords=audio;ai;music;generate;
+StartupNotify=true

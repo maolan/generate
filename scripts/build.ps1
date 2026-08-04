@@ -4,10 +4,22 @@ $ErrorActionPreference = "Stop"
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-$target    = "x86_64-pc-windows-msvc"
-$targetDir = "C:\cargo-target"
-$nsisPath  = "C:\nsis-3.10\makensis.exe"
-$staging   = "C:\maolan-staging\generate"
+$target   = "x86_64-pc-windows-msvc"
+$nsisPath = "C:\nsis-3.10\makensis.exe"
+$staging  = "C:\maolan-staging\generate"
+
+# ---------------------------------------------------------------------------
+# Version from Cargo.toml
+# ---------------------------------------------------------------------------
+$cargoToml = Join-Path (Split-Path $PSScriptRoot -Parent) "Cargo.toml"
+$pkgVersion = "0.0.0"
+if (Test-Path $cargoToml) {
+    $versionLine = Select-String -Path $cargoToml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1
+    if ($versionLine) {
+        $pkgVersion = $versionLine.Matches.Groups[1].Value
+    }
+}
+Write-Host "Package version: $pkgVersion"
 
 # ---------------------------------------------------------------------------
 # Elevation check
@@ -106,7 +118,16 @@ function Ensure-Rust {
     if (-not (Test-Path $installer)) {
         Invoke-WebRequest -Uri "https://win.rustup.rs/x86_64" -OutFile $installer
     }
-    & $installer -y --default-toolchain stable --target $target
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $installer -y --default-toolchain stable --target $target 2>&1 | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "Rust installation failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
 }
 
@@ -119,7 +140,7 @@ function Ensure-NSIS {
     $zip = "$env:TEMP\nsis-3.10.zip"
     $curl = "$env:SystemRoot\System32\curl.exe"
     if (Test-Path $curl) {
-        & $curl -L -o $zip "https://prdownloads.sourceforge.net/nsis/nsis-3.10.zip"
+        & $curl -s -L -o $zip "https://prdownloads.sourceforge.net/nsis/nsis-3.10.zip"
     } else {
         Invoke-WebRequest -Uri "https://prdownloads.sourceforge.net/nsis/nsis-3.10.zip" -OutFile $zip -MaximumRedirection 5
     }
@@ -149,18 +170,24 @@ Ensure-Git
 # ---------------------------------------------------------------------------
 # VC++ Redistributable
 # ---------------------------------------------------------------------------
-$vcRedist = Join-Path (Split-Path $PSScriptRoot -Parent) "vc_redist.x64.exe"
+$maolanRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$vcRedist = Join-Path $maolanRoot "vc_redist.x64.exe"
 if (-not (Test-Path $vcRedist)) {
-    Write-Host "Downloading VC++ Redistributable..."
+    Write-Host "Downloading VC++ Redistributable to $vcRedist..."
     Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile $vcRedist
 }
+
+$sourceDir = Split-Path $PSScriptRoot -Parent
 
 # ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
+Write-Host "Cleaning old build artifacts..."
+Push-Location $sourceDir
+cargo clean
+
 Write-Host "Building maolan-generate (release)..."
-Push-Location $PSScriptRoot
-cargo build --release --target $target --target-dir $targetDir
+cargo build --release --target $target
 Pop-Location
 
 # ---------------------------------------------------------------------------
@@ -168,7 +195,8 @@ Pop-Location
 # ---------------------------------------------------------------------------
 Write-Host "Staging files to $staging..."
 New-Item -ItemType Directory -Force $staging | Out-Null
-Copy-Item "$targetDir\$target\release\maolan-generate.exe" $staging -Force
+Copy-Item (Join-Path $sourceDir "target\$target\release\maolan-generate.exe") $staging -Force
+Copy-Item (Join-Path $sourceDir "target\$target\release\acestep_convert.exe") $staging -Force
 Copy-Item $vcRedist $staging -Force
 
 # ---------------------------------------------------------------------------
@@ -179,13 +207,38 @@ Write-Host "Building installer..."
 $nsiTemp = "$env:TEMP\maolan-generate-installer"
 New-Item -ItemType Directory -Force $nsiTemp | Out-Null
 Copy-Item "$PSScriptRoot\installer.nsi" "$nsiTemp\installer.nsi" -Force
-Copy-Item "$PSScriptRoot\LICENSE" "$nsiTemp\LICENSE" -Force -ErrorAction SilentlyContinue
-Push-Location $nsiTemp
-& $nsisPath "$nsiTemp\installer.nsi"
-Pop-Location
-Copy-Item "$nsiTemp\maolan-generate-setup.exe" "$PSScriptRoot\maolan-generate-setup.exe" -Force -ErrorAction SilentlyContinue
-if (Test-Path "$PSScriptRoot\maolan-generate-setup.exe") {
-    Write-Host "Done: $(Resolve-Path "$PSScriptRoot\maolan-generate-setup.exe")"
+Copy-Item (Join-Path (Split-Path $PSScriptRoot -Parent) "LICENSE") "$nsiTemp\LICENSE" -Force -ErrorAction SilentlyContinue
+$versionMatch = [regex]::Match($pkgVersion, '^(\d+)\.(\d+)\.(\d+)')
+if ($versionMatch.Success) {
+    $productVersion = "$($versionMatch.Groups[1].Value).$($versionMatch.Groups[2].Value).$($versionMatch.Groups[3].Value).0"
 } else {
-    Write-Error "Installer build failed. maolan-generate-setup.exe was not created."
+    Write-Warning "Package version '$pkgVersion' is not a numeric semver; using 0.0.0.0 for installer file metadata."
+    $productVersion = "0.0.0.0"
+}
+$iconPath = "$nsiTemp\maolan-icon.ico"
+$projectIcon = Join-Path (Split-Path $PSScriptRoot -Parent) "assets\images\maolan-icon.ico"
+if (Test-Path $projectIcon) {
+    Copy-Item $projectIcon $iconPath -Force
+} else {
+    $iconPath = ""
+}
+$nsisDefines = @(
+    "/INPUTCHARSET", "UTF8",
+    "/DMAOLAN_GENERATE_VERSION=$pkgVersion",
+    "/DMAOLAN_GENERATE_PRODUCT_VERSION=$productVersion"
+)
+if ($iconPath) {
+    $nsisDefines += "/DMAOLAN_GENERATE_ICON=$iconPath"
+}
+Push-Location $nsiTemp
+& $nsisPath @nsisDefines "$nsiTemp\installer.nsi"
+Pop-Location
+$distDir = Join-Path (Split-Path $PSScriptRoot -Parent) "dist"
+New-Item -ItemType Directory -Force $distDir | Out-Null
+$outFile = "maolan-generate-$pkgVersion.windows.amd64.exe"
+Copy-Item "$nsiTemp\maolan-generate-setup.exe" "$distDir\$outFile" -Force -ErrorAction SilentlyContinue
+if (Test-Path "$distDir\$outFile") {
+    Write-Host "Done: $(Resolve-Path "$distDir\$outFile")"
+} else {
+    Write-Error "Installer build failed. $outFile was not created."
 }
