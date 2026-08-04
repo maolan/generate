@@ -27,6 +27,62 @@ The crate currently supports:
 - local model directory overrides or Hugging Face cache resolution
 - ACE-Step 1.5 (turbo DiT) instrumental generation with BPM, key/scale, and
   time-signature conditioning (`--model acestep-turbo`)
+- text-to-MIDI generation using AMT tokenization and a deterministic
+  prompt interpreter (`--model text-to-midi`)
+- MIDI-LLM text-to-MIDI generation with the official Llama 3.2 1B checkpoint
+  (`--model midi-llm`)
+
+## Text-to-MIDI
+
+`--model text-to-midi` converts a text prompt into a Standard MIDI File. It is
+model-free: it parses the prompt for hints such as tempo (`fast`, `slow`, a
+`120 bpm` value), key/scale, time signature, instrument (`piano`, `guitar`,
+`drums`, `bass`, `strings`, `synth`, ...), and style (`arpeggio`, `chords`,
+`melody`, `bassline`, `drums`), then emits a deterministic AMT token sequence
+and writes it out as MIDI. The AMT tokenizer/detokenizer follows the vocabulary
+layout used by MIDI-LLM, so the same pipeline can later be driven by a neural
+model without changing the output layer.
+
+```bash
+cargo run --release -- \
+  --model text-to-midi \
+  --bpm 128 \
+  --key-scale "A minor" \
+  --time-signature "4/4" \
+  --midi-length 10 \
+  --midi-seed 42 \
+  --output loop.mid \
+  "dark rolling techno bassline"
+```
+
+## MIDI-LLM
+
+`--model midi-llm` runs the official
+[`slseanwu/MIDI-LLM_Llama-3.2-1B`](https://huggingface.co/slseanwu/MIDI-LLM_Llama-3.2-1B)
+checkpoint directly on the Burn backend of your choice. The model extends Llama
+3.2 1B with 55,026 AMT music tokens plus a small set of special tokens, giving
+an extended vocabulary of 183,286 entries. The CLI tokenizes the prompt with
+the Llama 3.2 SentencePiece tokenizer, appends the MIDI-BOS token, and samples
+music tokens with top-p nucleus sampling constrained to the extended music
+range. Generated token IDs are shifted back into AMT-native space and written
+as a MIDI file through the same AMT decoder used by `--model text-to-midi`.
+
+The checkpoint is downloaded automatically through `hf-hub` on first use, or
+you can point `--model-dir` at a local checkout that contains
+`tokenizer.model` and `model.safetensors`.
+
+```bash
+cargo run --release -- \
+  --model midi-llm \
+  --backend cpu \
+  --bpm 128 \
+  --time-signature "4/4" \
+  --midi-max-tokens 1024 \
+  --midi-top-p 0.98 \
+  --midi-seed 42 \
+  --output composition.mid \
+  "an upbeat piano piece in the style of Mozart"
+```
 
 ## ACE-Step 1.5
 

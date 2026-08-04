@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 pub mod heartcodec;
 pub mod heartmula_runtime;
+pub mod text_to_midi;
 
 pub mod acestep;
 
@@ -37,6 +38,10 @@ pub enum ModelChoice {
     AceStepTurbo,
     #[serde(rename = "acestep-sft")]
     AceStepSft,
+    #[serde(rename = "text-to-midi")]
+    TextToMidi,
+    #[serde(rename = "midi-llm")]
+    MidiLlm,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -108,10 +113,42 @@ pub struct GenerateRequest {
     /// ACE-Step turbo 5 Hz LM planner size.
     #[serde(default)]
     pub acestep_lm: AceStepLmSize,
+
+    /// Text-to-MIDI: generated length in seconds.
+    #[serde(default = "default_midi_length_seconds")]
+    pub midi_length_seconds: f32,
+
+    /// Text-to-MIDI: seed for deterministic generation.
+    #[serde(default)]
+    pub midi_seed: u64,
+
+    /// Text-to-MIDI / MIDI-LLM: maximum number of music tokens to generate.
+    #[serde(default = "default_midi_max_tokens")]
+    pub midi_max_tokens: usize,
+
+    /// MIDI-LLM: top-p nucleus-sampling threshold.
+    #[serde(default = "default_midi_top_p")]
+    pub midi_top_p: f32,
+
+    /// Whether the output path was explicitly set by the user.
+    #[serde(default, skip)]
+    pub output_path_explicit: bool,
 }
 
 fn default_ode_steps() -> usize {
     10
+}
+
+fn default_midi_length_seconds() -> f32 {
+    10.0
+}
+
+fn default_midi_max_tokens() -> usize {
+    1024
+}
+
+fn default_midi_top_p() -> f32 {
+    0.98
 }
 
 fn default_topk() -> usize {
@@ -160,7 +197,7 @@ Usage:
   maolan-generate [options] <prompt-or-lyrics>
 
 Options:
-  --model <happy-new-year|RL|acestep-turbo|acestep-sft>
+  --model <happy-new-year|RL|acestep-turbo|acestep-sft|text-to-midi|midi-llm>
   --model-dir <path>
   --output <path>
   --inspect
@@ -170,16 +207,20 @@ Options:
   --cfg-scale <float>      CFG scale (1.0=no guidance, 2.0=weak, 6.0=strong)
   --length <int>           HeartMula: output length in milliseconds
   --topk <int>             HeartMula: top-k sampling (default: 50)
-  --temperature <float>    HeartMula: sampling temperature (default: 1.0)
+  --temperature <float>    HeartMula / MIDI-LLM: sampling temperature (default: 1.0)
   --ode-steps <int>        HeartMula: flow matching steps (5=fast, 10=default, 20=best)
   --decoder-seed <int>     Seed for deterministic HeartCodec decoder latents
   --decode-only            Decode an existing frames JSON instead of generating tokens
   --frames-json <path>     Frames JSON input for --decode-only
   --decode-threads <int>    Number of worker threads for decode-only CPU decoding
-  --bpm <float>          ACE-Step: tempo in beats per minute (20-400)
-  --key-scale <text>     ACE-Step: musical key, e.g. 'C major' or 'A minor'
-  --time-signature <N/D> ACE-Step: time signature, e.g. '4/4' or '6/8'
+  --bpm <float>          ACE-Step / text-to-MIDI / MIDI-LLM: tempo in beats per minute (20-400)
+  --key-scale <text>     ACE-Step / text-to-MIDI: musical key, e.g. 'C major' or 'A minor'
+  --time-signature <N/D> ACE-Step / text-to-MIDI / MIDI-LLM: time signature, e.g. '4/4' or '6/8'
   --acestep-lm <0.6B|1.7B|4B>
+  --midi-length <float>  Text-to-MIDI: output length in seconds (default: 10)
+  --midi-seed <int>      Text-to-MIDI / MIDI-LLM: seed for deterministic output
+  --midi-max-tokens <int> MIDI-LLM: maximum music tokens to generate (default: 1024)
+  --midi-top-p <float>   MIDI-LLM: top-p nucleus-sampling threshold (default: 0.98)
   -h, --help
 "
 }
@@ -208,6 +249,11 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
     let mut key_scale = None;
     let mut time_signature = None;
     let mut acestep_lm = AceStepLmSize::default();
+    let mut midi_length_seconds = default_midi_length_seconds();
+    let mut midi_seed = 0_u64;
+    let mut midi_max_tokens = default_midi_max_tokens();
+    let mut midi_top_p = default_midi_top_p();
+    let mut output_path_explicit = false;
 
     while let Some(arg) = args.next() {
         let arg = arg
@@ -245,6 +291,7 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
                 args.next()
                     .ok_or_else(|| anyhow!("missing value after --output"))?,
             );
+            output_path_explicit = true;
             continue;
         }
 
@@ -397,6 +444,63 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
             continue;
         }
 
+        if arg == "--midi-length" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow!("missing value after --midi-length"))?
+                .into_string()
+                .map_err(|_| anyhow!("midi-length value must be valid UTF-8"))?;
+            midi_length_seconds = value
+                .parse::<f32>()
+                .map_err(|_| anyhow!("midi-length must be a number"))?;
+            if !midi_length_seconds.is_finite() || midi_length_seconds <= 0.0 {
+                bail!("midi-length must be a positive finite number");
+            }
+            continue;
+        }
+
+        if arg == "--midi-seed" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow!("missing value after --midi-seed"))?
+                .into_string()
+                .map_err(|_| anyhow!("midi-seed value must be valid UTF-8"))?;
+            midi_seed = value
+                .parse::<u64>()
+                .map_err(|_| anyhow!("midi-seed must be a whole number"))?;
+            continue;
+        }
+
+        if arg == "--midi-max-tokens" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow!("missing value after --midi-max-tokens"))?
+                .into_string()
+                .map_err(|_| anyhow!("midi-max-tokens value must be valid UTF-8"))?;
+            midi_max_tokens = value
+                .parse::<usize>()
+                .map_err(|_| anyhow!("midi-max-tokens must be a whole number"))?;
+            if midi_max_tokens == 0 {
+                bail!("midi-max-tokens must be greater than zero");
+            }
+            continue;
+        }
+
+        if arg == "--midi-top-p" {
+            let value = args
+                .next()
+                .ok_or_else(|| anyhow!("missing value after --midi-top-p"))?
+                .into_string()
+                .map_err(|_| anyhow!("midi-top-p value must be valid UTF-8"))?;
+            midi_top_p = value
+                .parse::<f32>()
+                .map_err(|_| anyhow!("midi-top-p must be a number"))?;
+            if !midi_top_p.is_finite() || !(0.0..=1.0).contains(&midi_top_p) {
+                bail!("midi-top-p must be between 0 and 1");
+            }
+            continue;
+        }
+
         if arg == "--model" {
             let value = args
                 .next()
@@ -408,9 +512,11 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
                 "RL" => ModelChoice::Rl,
                 "acestep-turbo" => ModelChoice::AceStepTurbo,
                 "acestep-sft" => ModelChoice::AceStepSft,
+                "text-to-midi" => ModelChoice::TextToMidi,
+                "midi-llm" => ModelChoice::MidiLlm,
                 _ => {
                     bail!(
-                        "unsupported model '{value}', expected one of: happy-new-year, RL, acestep-turbo, acestep-sft"
+                        "unsupported model '{value}', expected one of: happy-new-year, RL, acestep-turbo, acestep-sft, text-to-midi, midi-llm"
                     )
                 }
             };
@@ -490,6 +596,11 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
         key_scale,
         time_signature,
         acestep_lm,
+        midi_length_seconds,
+        midi_seed,
+        midi_max_tokens,
+        midi_top_p,
+        output_path_explicit,
     })
 }
 
@@ -530,6 +641,22 @@ pub fn validate_options(mut options: CliOptions) -> Result<CliOptions> {
     }
     if options.output_path.as_os_str().is_empty() {
         bail!("output path cannot be empty");
+    }
+    if matches!(
+        options.model,
+        ModelChoice::TextToMidi | ModelChoice::MidiLlm
+    ) && !options.output_path_explicit
+    {
+        options.output_path = PathBuf::from("output.mid");
+    }
+    if !options.midi_length_seconds.is_finite() || options.midi_length_seconds <= 0.0 {
+        bail!("midi-length must be a positive finite number");
+    }
+    if options.midi_max_tokens == 0 {
+        bail!("midi-max-tokens must be greater than zero");
+    }
+    if !options.midi_top_p.is_finite() || !(0.0..=1.0).contains(&options.midi_top_p) {
+        bail!("midi-top-p must be between 0 and 1");
     }
     if options.decode_only && options.frames_json.is_none() {
         bail!("--decode-only requires --frames-json");
@@ -1169,6 +1296,11 @@ mod tests {
             key_scale: None,
             time_signature: None,
             acestep_lm: AceStepLmSize::default(),
+            midi_length_seconds: 10.0,
+            midi_seed: 0,
+            midi_max_tokens: 1024,
+            midi_top_p: 0.98,
+            output_path_explicit: false,
         };
         let validated = super::validate_options(options).expect("validation should pass");
         assert_eq!(validated.prompt, "test prompt");
@@ -1198,6 +1330,11 @@ mod tests {
             key_scale: None,
             time_signature: None,
             acestep_lm: AceStepLmSize::default(),
+            midi_length_seconds: 10.0,
+            midi_seed: 0,
+            midi_max_tokens: 1024,
+            midi_top_p: 0.98,
+            output_path_explicit: false,
         };
         assert!(super::validate_options(options).is_err());
     }
@@ -1226,6 +1363,11 @@ mod tests {
             key_scale: None,
             time_signature: None,
             acestep_lm: AceStepLmSize::default(),
+            midi_length_seconds: 10.0,
+            midi_seed: 0,
+            midi_max_tokens: 1024,
+            midi_top_p: 0.98,
+            output_path_explicit: false,
         };
         assert!(super::validate_options(options).is_err());
     }
@@ -1254,6 +1396,11 @@ mod tests {
             key_scale: None,
             time_signature: None,
             acestep_lm: AceStepLmSize::default(),
+            midi_length_seconds: 10.0,
+            midi_seed: 0,
+            midi_max_tokens: 1024,
+            midi_top_p: 0.98,
+            output_path_explicit: false,
         };
         assert!(super::validate_options(options).is_err());
     }
@@ -1282,6 +1429,11 @@ mod tests {
             key_scale: None,
             time_signature: None,
             acestep_lm: AceStepLmSize::default(),
+            midi_length_seconds: 10.0,
+            midi_seed: 0,
+            midi_max_tokens: 1024,
+            midi_top_p: 0.98,
+            output_path_explicit: false,
         };
         assert!(super::validate_options(options).is_err());
     }
@@ -1310,6 +1462,11 @@ mod tests {
             key_scale: None,
             time_signature: None,
             acestep_lm: AceStepLmSize::default(),
+            midi_length_seconds: 10.0,
+            midi_seed: 0,
+            midi_max_tokens: 1024,
+            midi_top_p: 0.98,
+            output_path_explicit: false,
         };
         let validated = super::validate_options(options).expect("validation should pass");
         assert_eq!(validated.tags, Some("tag1, tag2".to_owned()));
@@ -1339,6 +1496,11 @@ mod tests {
             key_scale: None,
             time_signature: None,
             acestep_lm: AceStepLmSize::default(),
+            midi_length_seconds: 10.0,
+            midi_seed: 0,
+            midi_max_tokens: 1024,
+            midi_top_p: 0.98,
+            output_path_explicit: false,
         };
         let validated = super::validate_options(options).expect("validation should pass");
         assert_eq!(validated.tags, None);
@@ -1391,6 +1553,42 @@ mod tests {
         let args = [OsString::from("generate"), OsString::from("test prompt")];
         let options = parse_options(args).expect("options should parse");
         assert_eq!(options.decoder_seed, 0);
+    }
+
+    #[test]
+    fn parse_midi_llm_model_defaults_output_to_mid() {
+        let args = [
+            OsString::from("generate"),
+            OsString::from("--model"),
+            OsString::from("midi-llm"),
+            OsString::from("upbeat piano"),
+        ];
+        let options = parse_options(args).expect("options should parse");
+        assert_eq!(options.model, ModelChoice::MidiLlm);
+        assert_eq!(options.output_path, std::path::PathBuf::from("output.mid"));
+        assert_eq!(options.midi_max_tokens, 1024);
+        assert_eq!(options.midi_top_p, 0.98);
+    }
+
+    #[test]
+    fn parse_midi_llm_options() {
+        let args = [
+            OsString::from("generate"),
+            OsString::from("--model"),
+            OsString::from("midi-llm"),
+            OsString::from("--midi-max-tokens"),
+            OsString::from("512"),
+            OsString::from("--midi-top-p"),
+            OsString::from("0.95"),
+            OsString::from("--midi-seed"),
+            OsString::from("42"),
+            OsString::from("upbeat piano"),
+        ];
+        let options = parse_options(args).expect("options should parse");
+        assert_eq!(options.model, ModelChoice::MidiLlm);
+        assert_eq!(options.midi_max_tokens, 512);
+        assert_eq!(options.midi_top_p, 0.95);
+        assert_eq!(options.midi_seed, 42);
     }
 
     #[test]
@@ -1555,6 +1753,11 @@ mod tests {
             key_scale: Some("A minor".to_owned()),
             time_signature: Some("4/4".to_owned()),
             acestep_lm: AceStepLmSize::B1_7,
+            midi_length_seconds: 5.0,
+            midi_seed: 7,
+            midi_max_tokens: 1024,
+            midi_top_p: 0.98,
+            output_path_explicit: true,
         };
 
         let json = serde_json::to_string(&request).expect("serialization should succeed");

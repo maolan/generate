@@ -7,6 +7,7 @@ use maolan_generate::acestep::{
 };
 use maolan_generate::heartcodec;
 use maolan_generate::heartmula_runtime;
+use maolan_generate::text_to_midi;
 use maolan_generate::{
     AceStepLmSize, BackendChoice, GenerateError, GenerateProgress, GenerateResponseHeader,
     IPC_MODE_ENV, ModelChoice, help_text, parse_options, read_ipc_message, stderr_logging_enabled,
@@ -74,6 +75,14 @@ fn main() -> Result<()> {
         ModelChoice::AceStepTurbo | ModelChoice::AceStepSft
     ) {
         return run_acestep_cli(&options);
+    }
+
+    if matches!(options.model, ModelChoice::TextToMidi) {
+        return run_text_to_midi_cli(&options);
+    }
+
+    if matches!(options.model, ModelChoice::MidiLlm) {
+        return run_midi_llm_cli(&options);
     }
 
     if env::var_os(HEARTMULA_GENERATE_ONLY_ENV).is_none() {
@@ -212,6 +221,12 @@ fn run_ipc() -> Result<()> {
     let options = validate_options(read_ipc_message(&mut stdin)?)?;
 
     let output = match catch_ipc_generation_failure(AssertUnwindSafe(|| {
+        if matches!(options.model, ModelChoice::TextToMidi) {
+            return run_text_to_midi_ipc(&options, &mut stdout);
+        }
+        if matches!(options.model, ModelChoice::MidiLlm) {
+            return run_midi_llm_ipc(&options, &mut stdout);
+        }
         if matches!(
             options.model,
             ModelChoice::AceStepTurbo | ModelChoice::AceStepSft
@@ -332,6 +347,8 @@ fn model_name(model: ModelChoice) -> &'static str {
         ModelChoice::Rl => "RL",
         ModelChoice::AceStepTurbo => "acestep-turbo",
         ModelChoice::AceStepSft => "acestep-sft",
+        ModelChoice::TextToMidi => "text-to-midi",
+        ModelChoice::MidiLlm => "midi-llm",
     }
 }
 
@@ -339,10 +356,12 @@ fn heartmula_repo_id(model: ModelChoice) -> &'static str {
     match model {
         ModelChoice::HappyNewYear => HEARTMULA_HAPPY_NEW_YEAR_REPO_ID,
         ModelChoice::Rl => HEARTMULA_RL_REPO_ID,
-        // ACE-Step models resolve their own repos and never reach this
-        // function; the arms keep the match total.
+        // ACE-Step and text-to-MIDI models resolve their own assets and never
+        // reach this function; the arms keep the match total.
         ModelChoice::AceStepTurbo => ACESTEP_REPO_ID,
         ModelChoice::AceStepSft => ACESTEP_SFT_REPO_ID,
+        ModelChoice::TextToMidi => "",
+        ModelChoice::MidiLlm => "",
     }
 }
 
@@ -633,6 +652,184 @@ fn run_acestep_cli_with_backend<B: Backend>(
         meta.sample_rate_hz
     );
     Ok(())
+}
+
+fn run_text_to_midi_cli(options: &maolan_generate::CliOptions) -> Result<()> {
+    if options.inspect_only {
+        println!("text-to-MIDI generator (deterministic, model-free)");
+        return Ok(());
+    }
+    text_to_midi::generate_midi_file(
+        &options.output_path,
+        &options.prompt,
+        options.bpm,
+        options.key_scale.as_deref(),
+        options.time_signature.as_deref(),
+        options.midi_length_seconds,
+        options.midi_seed,
+    )?;
+    println!("wrote {}", options.output_path.display());
+    Ok(())
+}
+
+fn run_text_to_midi_ipc(
+    options: &maolan_generate::CliOptions,
+    stdout: &mut impl std::io::Write,
+) -> Result<GeneratedOutput> {
+    let progress = GenerateProgress {
+        phase: "text-to-midi".to_string(),
+        progress: 0.0,
+        operation: "Generating MIDI".to_string(),
+    };
+    write_ipc_message(stdout, &progress)?;
+    text_to_midi::generate_midi_file(
+        &options.output_path,
+        &options.prompt,
+        options.bpm,
+        options.key_scale.as_deref(),
+        options.time_signature.as_deref(),
+        options.midi_length_seconds,
+        options.midi_seed,
+    )?;
+    let header = GenerateResponseHeader {
+        backend: options.backend,
+        channels: 0,
+        frames: 0,
+        guidance_scale: 0.0,
+        prompt_tokens: 0,
+        sample_rate_hz: 0,
+        length: 0,
+        steps: 0,
+    };
+    Ok(GeneratedOutput { header })
+}
+
+fn run_midi_llm_cli(options: &maolan_generate::CliOptions) -> Result<()> {
+    if options.inspect_only {
+        println!("MIDI-LLM generator (Llama 3.2 1B + AMT)");
+        return Ok(());
+    }
+    let (tokenizer_path, checkpoint_path) =
+        text_to_midi::midi_llm::resolve_model_paths(options.model_dir.as_deref())?;
+    let config = text_to_midi::MidiLlmConfig {
+        tokenizer_path,
+        checkpoint_path,
+        max_tokens: options.midi_max_tokens,
+        temperature: options.temperature,
+        top_p: options.midi_top_p,
+        seed: options.midi_seed,
+        max_seq_len: 4096,
+    };
+    let time_signature = options
+        .time_signature
+        .as_deref()
+        .and_then(text_to_midi::TimeSignature::parse);
+    match options.backend {
+        BackendChoice::Cpu => {
+            let device = Default::default();
+            text_to_midi::generate_midi_file_with_llm::<burn::backend::NdArray<f32>>(
+                &config,
+                &device,
+                &options.prompt,
+                options.bpm.unwrap_or(120.0),
+                time_signature,
+                &options.output_path,
+            )
+        }
+        BackendChoice::Vulkan => {
+            let device = burn::backend::wgpu::WgpuDevice::default();
+            burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
+                &device,
+                vulkan_runtime_options(),
+            );
+            text_to_midi::generate_midi_file_with_llm::<burn::backend::Wgpu<f32, i64, u32>>(
+                &config,
+                &device,
+                &options.prompt,
+                options.bpm.unwrap_or(120.0),
+                time_signature,
+                &options.output_path,
+            )
+        }
+    }?;
+    println!("wrote {}", options.output_path.display());
+    Ok(())
+}
+
+fn run_midi_llm_ipc(
+    options: &maolan_generate::CliOptions,
+    stdout: &mut impl std::io::Write,
+) -> Result<GeneratedOutput> {
+    let progress = GenerateProgress {
+        phase: "midi-llm".to_string(),
+        progress: 0.0,
+        operation: "Loading MIDI-LLM".to_string(),
+    };
+    write_ipc_message(stdout, &progress)?;
+
+    let (tokenizer_path, checkpoint_path) =
+        text_to_midi::midi_llm::resolve_model_paths(options.model_dir.as_deref())?;
+    let config = text_to_midi::MidiLlmConfig {
+        tokenizer_path,
+        checkpoint_path,
+        max_tokens: options.midi_max_tokens,
+        temperature: options.temperature,
+        top_p: options.midi_top_p,
+        seed: options.midi_seed,
+        max_seq_len: 4096,
+    };
+    let time_signature = options
+        .time_signature
+        .as_deref()
+        .and_then(text_to_midi::TimeSignature::parse);
+
+    let progress = GenerateProgress {
+        phase: "midi-llm".to_string(),
+        progress: 0.5,
+        operation: "Generating MIDI tokens".to_string(),
+    };
+    write_ipc_message(stdout, &progress)?;
+
+    match options.backend {
+        BackendChoice::Cpu => {
+            let device = Default::default();
+            text_to_midi::generate_midi_file_with_llm::<burn::backend::NdArray<f32>>(
+                &config,
+                &device,
+                &options.prompt,
+                options.bpm.unwrap_or(120.0),
+                time_signature,
+                &options.output_path,
+            )
+        }
+        BackendChoice::Vulkan => {
+            let device = burn::backend::wgpu::WgpuDevice::default();
+            burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
+                &device,
+                vulkan_runtime_options(),
+            );
+            text_to_midi::generate_midi_file_with_llm::<burn::backend::Wgpu<f32, i64, u32>>(
+                &config,
+                &device,
+                &options.prompt,
+                options.bpm.unwrap_or(120.0),
+                time_signature,
+                &options.output_path,
+            )
+        }
+    }?;
+
+    let header = GenerateResponseHeader {
+        backend: options.backend,
+        channels: 0,
+        frames: 0,
+        guidance_scale: 0.0,
+        prompt_tokens: 0,
+        sample_rate_hz: 0,
+        length: 0,
+        steps: 0,
+    };
+    Ok(GeneratedOutput { header })
 }
 
 fn run_heartmula_ipc_with_backend<B: Backend>(
