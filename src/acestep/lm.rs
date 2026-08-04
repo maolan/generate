@@ -565,11 +565,14 @@ mod tests {
             .expect("should parse minimal tokenizer.json");
         assert_eq!(vocab.len(), 3);
         assert!(!vocab.is_empty());
-        assert_eq!(vocab.code_token_id(0), Some(200));
-        assert_eq!(vocab.code_token_id(1), Some(201));
-        assert_eq!(vocab.code_token_id(42), Some(250));
+        // The fixture's added-token ids are sequential starting at vocab_size
+        // (3) because tokie 0.1+ assigns ids from the vocab end for tokens
+        // that are not present in the model vocab.
+        assert_eq!(vocab.code_token_id(0), Some(6));
+        assert_eq!(vocab.code_token_id(1), Some(7));
+        assert_eq!(vocab.code_token_id(42), Some(8));
         assert_eq!(vocab.code_token_id(7), None);
-        assert_eq!(vocab.token_id_to_code(201), Some(1));
+        assert_eq!(vocab.token_id_to_code(7), Some(1));
         assert_eq!(vocab.token_id_to_code(101), None);
         assert_eq!(AudioCodeVocab::IM_END_ID, 151_645);
         assert_eq!(AudioCodeVocab::ENDOFTEXT_ID, 151_643);
@@ -580,7 +583,9 @@ mod tests {
         let path = testdata("lm_tokenizer_min.json");
         let ids = tokenize_prompt(&path, "<|im_start|>a<|im_end|>")
             .expect("should tokenize with the minimal fixture");
-        assert_eq!(ids, vec![101, 0, 102]);
+        // tokie 0.1+ assigns <|im_start|> and <|im_end|> the next sequential
+        // ids after the three model vocab entries.
+        assert_eq!(ids, vec![4, 0, 5]);
     }
 
     fn tiny_lm() -> AceStepLm<TestBackend> {

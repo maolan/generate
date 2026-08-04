@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use burn::prelude::Backend;
 use burn_store::{BurnpackStore, ModuleStore, TensorSnapshot};
-use huggingface_hub::{Repo, RepoType, api::sync::ApiBuilder};
+use huggingface_hub::HFClientSync;
 use maolan_generate::acestep::{
     AceStepModelPaths, AceStepPipeline, AceStepVariant, GenerateAudioMeta, GenerateMetadata,
 };
@@ -399,18 +399,25 @@ fn heartcodec_required_relative_files() -> [&'static str; 1] {
     [heartcodec_raw_bpk_rel()]
 }
 
+fn split_repo_id(repo_id: &str) -> Result<(&str, &str)> {
+    let (owner, name) = repo_id
+        .split_once('/')
+        .ok_or_else(|| anyhow!("invalid Hugging Face repo id: {repo_id}"))?;
+    Ok((owner, name))
+}
+
 fn ensure_repo_snapshot_dir(repo_id: &str, required_files: &[&'static str]) -> Result<PathBuf> {
-    let api = ApiBuilder::new()
-        .with_progress(true)
-        .build()
-        .context("failed to initialize Hugging Face client")?;
-    let repo = api.repo(Repo::new(repo_id.to_string(), RepoType::Model));
+    let (owner, name) = split_repo_id(repo_id)?;
+    let client = HFClientSync::new().context("failed to initialize Hugging Face client")?;
+    let repo = client.model(owner, name);
 
     let mut snapshot_dir: Option<PathBuf> = None;
 
     for relative_path in required_files {
         let cached_path = repo
-            .get(relative_path)
+            .download_file()
+            .filename(*relative_path)
+            .send()
             .with_context(|| format!("failed to fetch {repo_id}/{relative_path}"))?;
         let file_snapshot_dir = cached_path.parent().ok_or_else(|| {
             anyhow!(

@@ -16,7 +16,7 @@ use burn_store::{
     KeyRemapper, ModuleAdapter, ModuleSnapshot, PyTorchToBurnAdapter, SafetensorsStore,
     TensorSnapshot,
 };
-use huggingface_hub::{Repo, RepoType, api::sync::ApiBuilder};
+use huggingface_hub::HFClientSync;
 use maolan_llama::llama::{Llama, LlamaConfig, RopeConfig, RopeFrequencyScaling};
 use maolan_llama::sampling::Sampler;
 use maolan_llama::tokenizer::Tokenizer;
@@ -99,20 +99,24 @@ pub fn resolve_model_paths(model_dir_override: Option<&Path>) -> Result<(PathBuf
         return Ok((tokenizer, checkpoint));
     }
 
-    let api = ApiBuilder::new()
-        .with_progress(true)
-        .build()
-        .context("failed to initialize Hugging Face client")?;
-    let repo = api.repo(Repo::new(MIDI_LLM_REPO_ID.to_string(), RepoType::Model));
+    let (owner, name) = MIDI_LLM_REPO_ID
+        .split_once('/')
+        .ok_or_else(|| anyhow!("invalid Hugging Face repo id: {MIDI_LLM_REPO_ID}"))?;
+    let client = HFClientSync::new().context("failed to initialize Hugging Face client")?;
+    let repo = client.model(owner, name);
 
     let tokenizer = repo
-        .get(TOKENIZER_FILENAME)
+        .download_file()
+        .filename(TOKENIZER_FILENAME)
+        .send()
         .with_context(|| format!("failed to fetch {MIDI_LLM_REPO_ID}/{TOKENIZER_FILENAME}"))?;
     let checkpoint = repo
-        .get(SAFETENSORS_FILENAME)
+        .download_file()
+        .filename(SAFETENSORS_FILENAME)
+        .send()
         .with_context(|| format!("failed to fetch {MIDI_LLM_REPO_ID}/{SAFETENSORS_FILENAME}"))?;
     // Touch config so the snapshot directory is complete; we don't parse it yet.
-    let _ = repo.get(CONFIG_FILENAME);
+    let _ = repo.download_file().filename(CONFIG_FILENAME).send();
 
     Ok((tokenizer, checkpoint))
 }

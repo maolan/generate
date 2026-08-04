@@ -2644,13 +2644,13 @@ mod tests {
     }
 
     fn read_wav_f32(path: &std::path::Path) -> WavInfo {
-        use symphonia::core::audio::SampleBuffer;
-        use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
+        use symphonia::core::audio::sample::SampleFormat;
+        use symphonia::core::codecs::audio::{AudioDecoderOptions, CODEC_ID_NULL_AUDIO};
         use symphonia::core::errors::Error as SymphoniaError;
         use symphonia::core::formats::FormatOptions;
+        use symphonia::core::formats::probe::Hint;
         use symphonia::core::io::MediaSourceStream;
         use symphonia::core::meta::MetadataOptions;
-        use symphonia::core::probe::Hint;
 
         let file = std::fs::File::open(path).expect("open wav");
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
@@ -2658,43 +2658,51 @@ mod tests {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);
         }
-        let probed = symphonia::default::get_probe()
-            .format(
+        let mut format = symphonia::default::get_probe()
+            .probe(
                 &hint,
                 mss,
-                &FormatOptions::default(),
-                &MetadataOptions::default(),
+                FormatOptions::default(),
+                MetadataOptions::default(),
             )
             .expect("probe wav");
-        let mut format = probed.format;
         let track = format
             .tracks()
             .iter()
-            .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
+            .find(|t| {
+                t.codec_params
+                    .as_ref()
+                    .and_then(|p| p.audio())
+                    .map(|p| p.codec != CODEC_ID_NULL_AUDIO)
+                    .unwrap_or(false)
+            })
             .or_else(|| format.tracks().first())
             .expect("audio track");
-        let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
-        let sample_rate = track.codec_params.sample_rate.unwrap_or(48_000);
-        let bits_per_sample = track.codec_params.bits_per_sample.unwrap_or(32);
-        let sample_format = track.codec_params.sample_format;
+        let codec_params = track
+            .codec_params
+            .as_ref()
+            .and_then(|p| p.audio())
+            .expect("audio codec params");
+        let channels = codec_params
+            .channels
+            .as_ref()
+            .map(|c| c.count())
+            .unwrap_or(1);
+        let sample_rate = codec_params.sample_rate.unwrap_or(48_000);
+        let bits_per_sample = codec_params.bits_per_sample.unwrap_or(32);
+        let sample_format = codec_params.sample_format;
         let is_float = sample_format
-            .map(|f| {
-                matches!(
-                    f,
-                    symphonia::core::sample::SampleFormat::F32
-                        | symphonia::core::sample::SampleFormat::F64
-                )
-            })
+            .map(|f| matches!(f, SampleFormat::F32 | SampleFormat::F64))
             .unwrap_or(true);
         let track_id = track.id;
         let mut decoder = symphonia::default::get_codecs()
-            .make(&track.codec_params, &DecoderOptions::default())
+            .make_audio_decoder(codec_params, &AudioDecoderOptions::default())
             .expect("create decoder");
-        let mut sample_buf = None;
         let mut samples = Vec::new();
         loop {
             let packet = match format.next_packet() {
-                Ok(packet) => packet,
+                Ok(Some(packet)) => packet,
+                Ok(None) => break,
                 Err(SymphoniaError::IoError(e))
                     if e.kind() == std::io::ErrorKind::UnexpectedEof =>
                 {
@@ -2702,17 +2710,13 @@ mod tests {
                 }
                 Err(e) => panic!("read error: {e}"),
             };
-            if packet.track_id() != track_id {
+            if packet.track_id != track_id {
                 continue;
             }
             let decoded = decoder.decode(&packet).expect("decode packet");
-            if sample_buf.is_none() {
-                let spec = *decoded.spec();
-                sample_buf = Some(SampleBuffer::<f32>::new(decoded.capacity() as u64, spec));
-            }
-            let buf = sample_buf.as_mut().unwrap();
-            buf.copy_interleaved_ref(decoded);
-            samples.extend_from_slice(buf.samples());
+            let mut packet_samples = Vec::new();
+            decoded.copy_to_vec_interleaved(&mut packet_samples);
+            samples.extend_from_slice(&packet_samples);
         }
         WavInfo {
             channels: channels as u16,

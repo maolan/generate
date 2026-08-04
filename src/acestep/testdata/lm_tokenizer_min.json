@@ -4,7 +4,7 @@
   "padding": null,
   "added_tokens": [
     {
-      "id": 100,
+      "id": 3,
       "content": "<|endoftext|>",
       "single_word": false,
       "lstrip": false,
@@ -13,7 +13,7 @@
       "special": true
     },
     {
-      "id": 101,
+      "id": 4,
       "content": "<|im_start|>",
       "single_word": false,
       "lstrip": false,
@@ -22,7 +22,7 @@
       "special": true
     },
     {
-      "id": 102,
+      "id": 5,
       "content": "<|im_end|>",
       "single_word": false,
       "lstrip": false,
@@ -31,7 +31,7 @@
       "special": true
     },
     {
-      "id": 200,
+      "id": 6,
       "content": "<|audio_code_0|>",
       "single_word": false,
       "lstrip": false,
@@ -40,7 +40,7 @@
       "special": true
     },
     {
-      "id": 201,
+      "id": 7,
       "content": "<|audio_code_1|>",
       "single_word": false,
       "lstrip": false,
@@ -49,7 +49,7 @@
       "special": true
     },
     {
-      "id": 250,
+      "id": 8,
       "content": "<|audio_code_42|>",
       "single_word": false,
       "lstrip": false,
