@@ -17,9 +17,9 @@ use burn_store::{
     TensorSnapshot,
 };
 use huggingface_hub::{Repo, RepoType, api::sync::ApiBuilder};
-use llama_burn::llama::{Llama, LlamaConfig, RopeConfig, RopeFrequencyScaling};
-use llama_burn::sampling::Sampler;
-use llama_burn::tokenizer::Tokenizer;
+use maolan_llama::llama::{Llama, LlamaConfig, RopeConfig, RopeFrequencyScaling};
+use maolan_llama::sampling::Sampler;
+use maolan_llama::tokenizer::Tokenizer;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 

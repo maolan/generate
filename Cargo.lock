@@ -3496,21 +3496,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
-name = "llama-burn"
-version = "0.1.0"
-source = "git+https://github.com/tracel-ai/models.git#ec1b9e42e6692ef2b95f85c4ba783e07cd3d19af"
-dependencies = [
- "base64 0.22.1",
- "burn",
- "burn-store",
- "itertools 0.14.0",
- "rand 0.9.5",
- "rustc-hash 1.1.0",
- "serde",
- "tiktoken-rs",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3604,7 +3589,7 @@ dependencies = [
  "half",
  "hf-hub",
  "hound",
- "llama-burn",
+ "maolan-llama",
  "midly",
  "rand 0.9.5",
  "rayon",
@@ -3614,6 +3599,22 @@ dependencies = [
  "serde_json",
  "tokenizers",
  "tokie",
+]
+
+[[package]]
+name = "maolan-llama"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6fa903ee8e2e5c8c54d0f1a1edeca82fc9afcd673c2485322e4dd58849271093"
+dependencies = [
+ "base64 0.22.1",
+ "burn",
+ "burn-store",
+ "itertools 0.14.0",
+ "rand 0.9.5",
+ "rustc-hash 1.1.0",
+ "serde",
+ "tiktoken-rs",
 ]
 
 [[package]]

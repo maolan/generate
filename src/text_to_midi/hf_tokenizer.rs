@@ -1,12 +1,12 @@
-//! Hugging Face tokenizer adapter for `llama-burn`.
+//! Hugging Face tokenizer adapter for `maolan-llama`.
 //!
 //! The official MIDI-LLM checkpoint ships `tokenizer.json` (Hugging Face
 //! tokenizers format) rather than the tiktoken `.model` file that
-//! `llama-burn::tokenizer::Tiktoken` expects. This module wraps the
+//! `maolan_llama::tokenizer::Tiktoken` expects. This module wraps the
 //! `tokenizers` crate so the Llama config can be initialized from the HF
 //! checkpoint as-is.
 
-use llama_burn::tokenizer::Tokenizer;
+use maolan_llama::tokenizer::Tokenizer;
 
 /// Tokenizer loaded from a Hugging Face `tokenizer.json` file.
 pub struct HfTokenizer {
