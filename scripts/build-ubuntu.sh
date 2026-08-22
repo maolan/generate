@@ -142,13 +142,10 @@ else
     BIN_DIR="$SOURCE_DIR/target/release"
 fi
 
-# Verify binaries exist
-for bin in maolan-generate acestep_convert; do
-    if [[ ! -f "$BIN_DIR/$bin" ]]; then
-        echo "Error: Binary '$BIN_DIR/$bin' not found after build" >&2
-        exit 1
-    fi
-done
+if [[ ! -f "$BIN_DIR/maolan-generate" ]]; then
+    echo "Error: Binary '$BIN_DIR/maolan-generate' not found after build" >&2
+    exit 1
+fi
 
 echo "Build completed successfully."
 
@@ -168,7 +165,6 @@ mkdir -p "$STAGING_DIR/usr/share/doc/$PKG_NAME"
 
 # Binaries
 cp "$BIN_DIR/maolan-generate" "$STAGING_DIR/usr/bin/"
-cp "$BIN_DIR/acestep_convert" "$STAGING_DIR/usr/bin/"
 strip "$STAGING_DIR/usr/bin/"*
 chmod 755 "$STAGING_DIR/usr/bin/"*
 
@@ -222,7 +218,6 @@ mkdir -p "$APPDIR/usr/share/applications"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/scalable/apps"
 
 cp "$BIN_DIR/maolan-generate" "$APPDIR/usr/bin/"
-cp "$BIN_DIR/acestep_convert" "$APPDIR/usr/bin/"
 
 # AppImage desktop entry (relative Exec path for AppRun)
 cp "$SOURCE_DIR/assets/desktop/maolan-generate-linux.desktop" "$APPDIR/usr/share/applications/maolan-generate.desktop"

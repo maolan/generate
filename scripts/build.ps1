@@ -196,7 +196,6 @@ Pop-Location
 Write-Host "Staging files to $staging..."
 New-Item -ItemType Directory -Force $staging | Out-Null
 Copy-Item (Join-Path $sourceDir "target\$target\release\maolan-generate.exe") $staging -Force
-Copy-Item (Join-Path $sourceDir "target\$target\release\acestep_convert.exe") $staging -Force
 Copy-Item $vcRedist $staging -Force
 
 # ---------------------------------------------------------------------------

@@ -118,21 +118,19 @@ cargo run --release -- \
 ```
 
 Weights are converted offline from the official safetensors checkpoints into
-BurnPack files with the bundled converter:
+BurnPack files by the companion model repository:
+
+```bash
+git clone https://huggingface.co/maolandaw/ACE-Step-1.5-burn
+cd ACE-Step-1.5-burn
+bin/convert_acestep.sh /path/to/out
+```
+
+The converter can also be run directly from that repository:
 
 ```bash
 cargo run --release --bin acestep_convert -- \
   --component dit --input model.safetensors --output acestep-dit.bpk
-```
-
-(`--component` is one of `text-encoder`, `lm`, `dit`, `condition`, `vae`,
-`silence`; see `acestep_convert --help`.) To download the official checkpoints
-from Hugging Face and convert them in one go (pure Rust + curl, no Python
-needed):
-
-```bash
-bin/convert_acestep.sh /path/to/out                 # converts all turbo LM planners
-bin/convert_acestep.sh /path/to/out --snapshot-dir /data/Ace-Step1.5  # local checkout
 ```
 
 The pre-converted files are expected
@@ -150,11 +148,6 @@ unsuffixed names above. The larger planners are written as
 `acestep-lm-1.7b.bpk` / `lm_config-1.7b.json` / `lm_tokenizer-1.7b.json` and
 `acestep-lm-4b.bpk` / `lm_config-4b.json` / `lm_tokenizer-4b.json`. Select one
 at runtime with `--acestep-lm 0.6B`, `--acestep-lm 1.7B`, or `--acestep-lm 4B`.
-
-Like the HeartMuLa burn repos (which vendor their own `convert.sh` and
-exporter sources), `maolandaw/ACE-Step-1.5-burn` should be published with
-`src/bin/acestep_convert.rs` and `bin/convert_acestep.sh` copied in, so the
-repo stays self-describing.
 
 Lyrics/vocal conditioning is out of scope: the lyric encoder always receives a
 single dummy token, and generation is instrumental only.

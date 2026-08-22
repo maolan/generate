@@ -110,7 +110,6 @@ SectionEnd
 ;--------------------------------
 Section "Uninstall"
     Delete "$INSTDIR\maolan-generate.exe"
-    Delete "$INSTDIR\acestep_convert.exe"
     Delete "$INSTDIR\Uninstall.exe"
 
     Delete "$SMPROGRAMS\Maolan Generate\Maolan Generate.lnk"

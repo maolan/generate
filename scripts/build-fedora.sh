@@ -133,13 +133,10 @@ else
     BIN_DIR="$SOURCE_DIR/target/release"
 fi
 
-# Verify binaries exist
-for bin in maolan-generate acestep_convert; do
-    if [[ ! -f "$BIN_DIR/$bin" ]]; then
-        echo "Error: Binary '$BIN_DIR/$bin' not found after build" >&2
-        exit 1
-    fi
-done
+if [[ ! -f "$BIN_DIR/maolan-generate" ]]; then
+    echo "Error: Binary '$BIN_DIR/maolan-generate' not found after build" >&2
+    exit 1
+fi
 
 echo "Build completed successfully."
 
@@ -160,7 +157,6 @@ mkdir -p "$STAGING_DIR/usr/share/doc/$PKG_NAME"
 
 # Binaries
 cp "$BIN_DIR/maolan-generate" "$STAGING_DIR/usr/bin/"
-cp "$BIN_DIR/acestep_convert" "$STAGING_DIR/usr/bin/"
 strip "$STAGING_DIR/usr/bin/"*
 chmod 755 "$STAGING_DIR/usr/bin/"*
 
@@ -204,7 +200,6 @@ tar xzf %{SOURCE0}
 %files
 %defattr(-,root,root,-)
 /usr/bin/maolan-generate
-/usr/bin/acestep_convert
 %doc /usr/share/doc/maolan-generate/README.md
 %license /usr/share/doc/maolan-generate/LICENSE
 
