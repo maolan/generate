@@ -11,9 +11,9 @@
 
 pub mod amt;
 pub mod generator;
-pub mod hf_tokenizer;
 pub mod midi;
 pub mod midi_llm;
+pub mod tiktoken_convert;
 
 pub use amt::{AmtEvent, events_to_tokens, tokens_to_events};
 pub use generator::{TextToMidiConfig, generate_events, generate_tokens};

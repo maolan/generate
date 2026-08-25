@@ -5,8 +5,8 @@
 //! directly on the Burn backend chosen by the CLI.
 
 use super::amt::tokens_to_events;
-use super::hf_tokenizer::HfTokenizer;
 use super::midi::{TimeSignature, write_midi};
+use super::tiktoken_convert::ensure_tiktoken_model;
 use anyhow::{Context, Result, anyhow, bail};
 use burn::tensor::DType;
 use burn::tensor::{
@@ -19,7 +19,7 @@ use burn_store::{
 use huggingface_hub::HFClientSync;
 use maolan_llama::llama::{Llama, LlamaConfig, RopeConfig, RopeFrequencyScaling};
 use maolan_llama::sampling::Sampler;
-use maolan_llama::tokenizer::Tokenizer;
+use maolan_llama::tokenizer::{Tiktoken, Tokenizer};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -143,11 +143,11 @@ fn midi_llama_config(tokenizer_path: &Path) -> LlamaConfig {
 pub fn load_model<B: Backend>(
     config: &MidiLlmConfig,
     device: &Device<B>,
-) -> Result<Llama<B, HfTokenizer>> {
-    let llama_config =
-        midi_llama_config(&config.tokenizer_path).with_max_seq_len(config.max_seq_len);
+) -> Result<Llama<B, Tiktoken>> {
+    let tiktoken_model = ensure_tiktoken_model(&config.tokenizer_path)?;
+    let llama_config = midi_llama_config(&tiktoken_model).with_max_seq_len(config.max_seq_len);
     let mut llama = llama_config
-        .init::<B, HfTokenizer>(device)
+        .init::<B, Tiktoken>(device)
         .map_err(|err| anyhow!("failed to initialize MIDI-LLM model: {err}"))?;
 
     load_safetensors_into_model(&mut llama, &config.checkpoint_path)?;
@@ -185,7 +185,7 @@ impl ModuleAdapter for Bf16ToF32Adapter {
 }
 
 fn load_safetensors_into_model<B: Backend>(
-    llama: &mut Llama<B, HfTokenizer>,
+    llama: &mut Llama<B, Tiktoken>,
     checkpoint_path: &Path,
 ) -> Result<()> {
     let patterns: Vec<(&str, &str)> = vec![
