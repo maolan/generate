@@ -9,19 +9,16 @@ use super::midi::{TimeSignature, write_midi};
 use super::tiktoken_convert::ensure_tiktoken_model;
 use anyhow::{Context, Result, anyhow, bail};
 use burn::tensor::DType;
-use burn::tensor::{
-    Bool, DataError, Device, Int, Shape, Tensor, TensorData, activation::softmax, backend::Backend,
-};
+use burn::tensor::{Bool, DataError, Device, Int, Shape, Tensor, TensorData, activation::softmax};
 use burn_store::{
-    KeyRemapper, ModuleAdapter, ModuleSnapshot, PyTorchToBurnAdapter, SafetensorsStore,
-    TensorSnapshot,
+    KeyRemapper, ModuleAdapter, ModuleContext, ModuleSnapshot, PyTorchToBurnAdapter,
+    SafetensorsStore,
 };
 use huggingface_hub::HFClientSync;
 use maolan_llama::llama::{Llama, LlamaConfig, RopeConfig, RopeFrequencyScaling};
 use maolan_llama::sampling::Sampler;
 use maolan_llama::tokenizer::{Tiktoken, Tokenizer};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
 /// Start of the MIDI token range in the extended MIDI-LLM vocabulary.
 ///
@@ -140,14 +137,11 @@ fn midi_llama_config(tokenizer_path: &Path) -> LlamaConfig {
 }
 
 /// Load the MIDI-LLM model on the chosen backend.
-pub fn load_model<B: Backend>(
-    config: &MidiLlmConfig,
-    device: &Device<B>,
-) -> Result<Llama<B, Tiktoken>> {
+pub fn load_model(config: &MidiLlmConfig, device: &Device) -> Result<Llama<Tiktoken>> {
     let tiktoken_model = ensure_tiktoken_model(&config.tokenizer_path)?;
     let llama_config = midi_llama_config(&tiktoken_model).with_max_seq_len(config.max_seq_len);
     let mut llama = llama_config
-        .init::<B, Tiktoken>(device)
+        .init::<Tiktoken>(device)
         .map_err(|err| anyhow!("failed to initialize MIDI-LLM model: {err}"))?;
 
     load_safetensors_into_model(&mut llama, &config.checkpoint_path)?;
@@ -155,27 +149,25 @@ pub fn load_model<B: Backend>(
 }
 
 /// Adapter that casts BF16 checkpoint weights to F32 so the model can run on
-/// backends (such as NdArray CPU) that do not implement BF16 tensor operations.
+/// CPU and GPU inference consistently uses F32 weights.
 #[derive(Debug, Clone, Default)]
 struct Bf16ToF32Adapter;
 
 impl ModuleAdapter for Bf16ToF32Adapter {
-    fn adapt(&self, snapshot: &TensorSnapshot) -> TensorSnapshot {
-        if snapshot.dtype != DType::BF16 {
-            return snapshot.clone();
+    fn adapt(
+        &self,
+        tensor: burn_store::burn_pack::Tensor,
+        _context: ModuleContext<'_>,
+    ) -> burn_store::burn_pack::Tensor {
+        if tensor.dtype != DType::BF16 {
+            return tensor;
         }
-        let original_data_fn = snapshot.clone_data_fn();
-        let cast_data_fn = Rc::new(move || {
-            let data = original_data_fn()?;
-            Ok(data.convert_dtype(DType::F32))
-        });
-        TensorSnapshot::from_closure(
-            cast_data_fn,
+        burn_store::bridge::map_data(
+            tensor.clone(),
+            tensor.name.clone(),
             DType::F32,
-            snapshot.shape.clone(),
-            snapshot.path_stack.clone().unwrap_or_default(),
-            snapshot.container_stack.clone().unwrap_or_default(),
-            snapshot.tensor_id.unwrap_or_default(),
+            tensor.shape.clone(),
+            |data| data.convert_dtype(DType::F32),
         )
     }
 
@@ -184,10 +176,7 @@ impl ModuleAdapter for Bf16ToF32Adapter {
     }
 }
 
-fn load_safetensors_into_model<B: Backend>(
-    llama: &mut Llama<B, Tiktoken>,
-    checkpoint_path: &Path,
-) -> Result<()> {
+fn load_safetensors_into_model(llama: &mut Llama<Tiktoken>, checkpoint_path: &Path) -> Result<()> {
     let patterns: Vec<(&str, &str)> = vec![
         (r"^model\.embed_tokens\.(.+)$", "tok_embeddings.$1"),
         (r"^lm_head\.(.+)$", "output.$1"),
@@ -262,15 +251,15 @@ fn load_safetensors_into_model<B: Backend>(
 }
 
 /// Generate AMT-native tokens from a text prompt and write them to a MIDI file.
-pub fn generate_midi_file<B: Backend>(
+pub fn generate_midi_file(
     config: &MidiLlmConfig,
-    device: &Device<B>,
+    device: &Device,
     prompt: &str,
     bpm: f32,
     time_signature: Option<TimeSignature>,
     output_path: &Path,
 ) -> Result<()> {
-    let mut llama = load_model::<B>(config, device)?;
+    let mut llama = load_model(config, device)?;
 
     let text_prompt = format!("{SYSTEM_PROMPT}{prompt} ");
     let mut input_tokens = llama.tokenizer.encode(&text_prompt, true, false);
@@ -281,7 +270,7 @@ pub fn generate_midi_file<B: Backend>(
     let mut generated = Vec::with_capacity(config.max_tokens);
 
     // Prefill with the full prompt + MIDI-BOS.
-    let mut input_tensor = tokens_to_tensor::<B>(device, &input_tokens);
+    let mut input_tensor = tokens_to_tensor(device, &input_tokens);
     let mut logits = llama
         .model
         .forward(input_tensor, &mut llama.cache, &llama.rope);
@@ -291,7 +280,7 @@ pub fn generate_midi_file<B: Backend>(
             sample_next_token(&logits, &disallowed_mask, config.temperature, &mut sampler)?;
         generated.push(next_token);
 
-        input_tensor = tokens_to_tensor::<B>(device, &[next_token]);
+        input_tensor = tokens_to_tensor(device, &[next_token]);
         logits = llama
             .model
             .forward(input_tensor, &mut llama.cache, &llama.rope);
@@ -306,27 +295,23 @@ pub fn generate_midi_file<B: Backend>(
         .with_context(|| "failed to write generated MIDI file")
 }
 
-fn tokens_to_tensor<B: Backend>(device: &Device<B>, tokens: &[u32]) -> Tensor<B, 2, Int> {
+fn tokens_to_tensor(device: &Device, tokens: &[u32]) -> Tensor<2, Int> {
     let data = TensorData::new(tokens.to_vec(), Shape::new([1, tokens.len()]));
-    Tensor::<B, 2, Int>::from_data(data, device)
+    Tensor::<2, Int>::from_data(data, device)
 }
 
-fn build_disallowed_mask<B: Backend>(
-    device: &Device<B>,
-    start: u32,
-    end: u32,
-) -> Tensor<B, 1, Bool> {
+fn build_disallowed_mask(device: &Device, start: u32, end: u32) -> Tensor<1, Bool> {
     let vocab_size = end as usize;
     let mut mask = vec![true; vocab_size];
     for i in start..end {
         mask[i as usize] = false;
     }
-    Tensor::<B, 1, Bool>::from_data(TensorData::new(mask, Shape::new([vocab_size])), device)
+    Tensor::<1, Bool>::from_data(TensorData::new(mask, Shape::new([vocab_size])), device)
 }
 
-fn sample_next_token<B: Backend>(
-    logits: &Tensor<B, 3>,
-    disallowed_mask: &Tensor<B, 1, Bool>,
+fn sample_next_token(
+    logits: &Tensor<3>,
+    disallowed_mask: &Tensor<1, Bool>,
     temperature: f32,
     sampler: &mut Sampler,
 ) -> Result<u32> {
@@ -352,6 +337,7 @@ fn sample_next_token<B: Backend>(
     let sampled = sampler.sample(probs);
     let value = sampled
         .into_data()
+        .convert::<i64>()
         .as_slice::<i64>()
         .map_err(|e: DataError| anyhow!("failed to read sampled token: {e}"))?
         .first()
@@ -363,7 +349,15 @@ fn sample_next_token<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::NdArray;
+
+    #[test]
+    fn sampling_reads_default_integer_dtype() {
+        let device = Device::flex();
+        let logits = Tensor::<3>::from_floats([[[1.0, 5.0, 2.0]]], &device);
+        let mask = Tensor::<1, Bool>::from_data([false, false, false], &device);
+        let token = sample_next_token(&logits, &mask, 1.0, &mut Sampler::Argmax).unwrap();
+        assert_eq!(token, 1);
+    }
 
     #[test]
     fn midi_token_constants_match_discussion() {
@@ -376,10 +370,9 @@ mod tests {
 
     #[test]
     fn disallowed_mask_blocks_text_tokens() {
-        type B = NdArray<f32>;
-        let device = Default::default();
-        let mask = build_disallowed_mask::<B>(&device, MIDI_TOKEN_START, MIDI_VOCAB_SIZE);
-        let data = mask.into_data().to_vec::<bool>().unwrap();
+        let device = burn::tensor::Device::flex();
+        let mask = build_disallowed_mask(&device, MIDI_TOKEN_START, MIDI_VOCAB_SIZE);
+        let data = mask.into_data().try_to_vec::<bool>().unwrap();
         assert_eq!(data.len(), MIDI_VOCAB_SIZE as usize);
         assert!(data[MIDI_TOKEN_START as usize - 1]);
         assert!(!data[MIDI_TOKEN_START as usize]);

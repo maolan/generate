@@ -16,8 +16,6 @@ use maolan_generate::acestep::qwen3::{Qwen3Config, Qwen3Model};
 use maolan_generate::acestep::vae::{OobleckDecoder, OobleckVaeConfig};
 use std::path::{Path, PathBuf};
 
-type B = burn::backend::NdArray<f32>;
-
 const ORACLE_CODES: [u32; 19] = [
     37162, 24482, 53681, 61696, 48912, 36323, 57341, 14786, 18321, 50090, 36760, 36697, 36056,
     38160, 35080, 56000, 32927, 35847, 37127,
@@ -53,10 +51,10 @@ fn load_bin(path: &Path) -> (Vec<i32>, Vec<f32>) {
     (shape, data)
 }
 
-fn vec_of<B: burn::tensor::backend::Backend>(t: Tensor<B, 3>) -> Vec<f32> {
+fn vec_of(t: Tensor<3>) -> Vec<f32> {
     t.into_data()
         .convert::<f32>()
-        .to_vec()
+        .try_to_vec()
         .expect("tensor to vec")
 }
 
@@ -67,31 +65,23 @@ fn main() -> anyhow::Result<()> {
     let noise_path = args.next().map(PathBuf::from);
     std::fs::create_dir_all(&out_dir)?;
 
-    let device = Default::default();
+    let device = burn::tensor::Device::flex();
 
     let dit_config = AceStepConfig::load(&model_dir.join("dit_config.json"))?;
     let text_config = Qwen3Config::load(&model_dir.join("qwen3_config.json"))?;
     let vae_config = OobleckVaeConfig::load(&model_dir.join("vae_config.json"))?;
     eprintln!("loading components...");
-    let text_encoder = Qwen3Model::<B>::from_burnpack(
-        &text_config,
-        &model_dir.join("qwen3-encoder.bpk"),
-        &device,
-    )?;
-    let condition = AceStepCondition::<B>::from_burnpack(
+    let text_encoder =
+        Qwen3Model::from_burnpack(&text_config, &model_dir.join("qwen3-encoder.bpk"), &device)?;
+    let condition = AceStepCondition::from_burnpack(
         &dit_config,
         &model_dir.join("acestep-condition.bpk"),
         &device,
     )?;
-    let dit =
-        AceStepDiT::<B>::from_burnpack(&dit_config, &model_dir.join("acestep-dit.bpk"), &device)?;
-    let vae = OobleckDecoder::<B>::from_burnpack(
-        &vae_config,
-        &model_dir.join("acestep-vae.bpk"),
-        &device,
-    )?;
-    let silence =
-        SilenceLatent::<B>::from_burnpack(&model_dir.join("silence_latent.bpk"), &device)?;
+    let dit = AceStepDiT::from_burnpack(&dit_config, &model_dir.join("acestep-dit.bpk"), &device)?;
+    let vae =
+        OobleckDecoder::from_burnpack(&vae_config, &model_dir.join("acestep-vae.bpk"), &device)?;
+    let silence = SilenceLatent::from_burnpack(&model_dir.join("silence_latent.bpk"), &device)?;
     let tokenizer = tokie::Tokenizer::from_json(model_dir.join("tokenizer.json"))
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
 
@@ -102,7 +92,7 @@ fn main() -> anyhow::Result<()> {
     let mut ids: Vec<i64> = ids.into_iter().map(i64::from).collect();
     ids.push(151643); // explicit EOS (official add_eos=true)
     let n_text = ids.len();
-    let ids_t = Tensor::<B, 2, Int>::from_data(TensorData::new(ids, [1, n_text]), &device);
+    let ids_t = Tensor::<2, Int>::from_data(TensorData::new(ids, [1, n_text]), &device);
     let text_hidden = text_encoder.forward(ids_t, true);
     let text_hidden_vec = vec_of(text_hidden.clone());
     dump_tensor(
@@ -122,7 +112,7 @@ fn main() -> anyhow::Result<()> {
     lyric_ids.push(151643); // explicit EOS (official add_eos=true)
     let n_lyric = lyric_ids.len();
     let lyric_ids_t =
-        Tensor::<B, 2, Int>::from_data(TensorData::new(lyric_ids, [1, n_lyric]), &device);
+        Tensor::<2, Int>::from_data(TensorData::new(lyric_ids, [1, n_lyric]), &device);
     // Official: lyric branch is a raw embed_tokens lookup (no transformer).
     let lyric_hidden = text_encoder.embed_tokens.forward(lyric_ids_t);
     let lyric_embed_vec = vec_of(lyric_hidden.clone());
@@ -132,21 +122,21 @@ fn main() -> anyhow::Result<()> {
         &lyric_embed_vec,
         &[n_lyric as i32, 1024],
     );
-    let lyric_mask = Tensor::<B, 2, Int>::ones([1, n_lyric], &device);
+    let lyric_mask = Tensor::<2, Int>::ones([1, n_lyric], &device);
 
     // ---- conditioning: use the oracle's enc_hidden/context when provided ----
-    let mut oracle_context: Option<Tensor<B, 3>> = None;
+    let mut oracle_context: Option<Tensor<3>> = None;
     let enc = if let Some(dir) = std::env::var_os("MAOLAN_ORACLE_DUMP_DIR") {
         let dir = PathBuf::from(dir);
         let (enc_shape, enc_data) = load_bin(&dir.join("enc_hidden.bin"));
         eprintln!("oracle enc_hidden: {enc_shape:?}");
         let (ctx_shape, ctx_data) = load_bin(&dir.join("context.bin"));
         eprintln!("oracle context: {ctx_shape:?}");
-        let enc = Tensor::<B, 3>::from_data(
+        let enc = Tensor::<3>::from_data(
             TensorData::new(enc_data, [1, enc_shape[0] as usize, enc_shape[1] as usize]),
             &device,
         );
-        let ctx = Tensor::<B, 3>::from_data(TensorData::new(ctx_data, [1, 96, 128]), &device);
+        let ctx = Tensor::<3>::from_data(TensorData::new(ctx_data, [1, 96, 128]), &device);
         oracle_context = Some(ctx);
         enc
     } else {
@@ -177,8 +167,7 @@ fn main() -> anyhow::Result<()> {
         })
         .unwrap_or_else(|| ORACLE_CODES.to_vec());
     let n_codes = codes.len();
-    let codes_tensor =
-        Tensor::<B, 2, Int>::from_data(TensorData::new(codes, [1, n_codes]), &device);
+    let codes_tensor = Tensor::<2, Int>::from_data(TensorData::new(codes, [1, n_codes]), &device);
     let hints = condition.codes_to_hints(codes_tensor);
     let [_, hint_len, _] = hints.dims();
     let hints_vec = vec_of(hints.clone());
@@ -188,7 +177,7 @@ fn main() -> anyhow::Result<()> {
     let noise = if let Some(path) = noise_path {
         let (shape, data) = load_bin(&path);
         let frames = shape[0] as usize;
-        Tensor::<B, 3>::from_data(TensorData::new(data, [1, frames, 64]), &device)
+        Tensor::<3>::from_data(TensorData::new(data, [1, frames, 64]), &device)
     } else {
         maolan_generate::acestep::pipeline::seeded_latent_noise(0, hint_len, 64, &device)
     };

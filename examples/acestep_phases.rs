@@ -18,8 +18,6 @@ use maolan_generate::acestep::{
 use maolan_generate::heartcodec::write_wav_from_f32_interleaved;
 use std::path::Path;
 
-type B = burn::backend::Wgpu<f32, i64, u32>;
-
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let model_dir = args
@@ -36,14 +34,11 @@ fn main() -> anyhow::Result<()> {
     let time_signature = args.next().or_else(|| Some("4/4".to_string()));
     let length_ms: usize = args.next().and_then(|v| v.parse().ok()).unwrap_or(4000);
 
-    let device = burn::backend::wgpu::WgpuDevice::default();
-    burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
-        &device,
-        burn::backend::wgpu::RuntimeOptions {
-            memory_config: burn::backend::wgpu::MemoryConfiguration::ExclusivePages,
-            ..Default::default()
-        },
-    );
+    let device = burn::tensor::Device::wgpu_options()
+        .graphics_api(burn::tensor::wgpu::WgpuBackend::Vulkan)
+        .memory_config(burn::tensor::wgpu::MemoryConfiguration::ExclusivePages)
+        .init()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     let variant = if std::env::var("MAOLAN_ACESTEP_VARIANT")
         .map(|v| v == "sft")
@@ -57,7 +52,7 @@ fn main() -> anyhow::Result<()> {
     let mut progress = |phase: &str, p: f32, op: &str| {
         eprintln!("[{phase}] {:.0}% {op}", p * 100.0);
     };
-    let pipeline = AceStepPipeline::<B>::load(&paths, &device, &mut progress)?;
+    let pipeline = AceStepPipeline::load(&paths, &device, &mut progress)?;
 
     let metadata = GenerateMetadata {
         bpm,
@@ -117,7 +112,7 @@ fn main() -> anyhow::Result<()> {
     let channel_major: Vec<f32> = audio
         .into_data()
         .convert::<f32>()
-        .to_vec()
+        .try_to_vec()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut interleaved = vec![0.0_f32; channel_major.len()];
     for (ch, samples) in channel_major.chunks_exact(frames).enumerate() {
@@ -136,13 +131,13 @@ fn main() -> anyhow::Result<()> {
     println!("wrote {path} (full pipeline)");
 
     // Silence decode reference.
-    let silence = SilenceLatent::<B>::from_burnpack(&paths.silence_latent_bpk, &device)?;
+    let silence = SilenceLatent::from_burnpack(&paths.silence_latent_bpk, &device)?;
     let silence_audio = pipeline.vae.decode(silence.slice(frames / 1920));
     let [_, sch, sframes] = silence_audio.dims();
     let smaj: Vec<f32> = silence_audio
         .into_data()
         .convert::<f32>()
-        .to_vec()
+        .try_to_vec()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut sinter = vec![0.0_f32; smaj.len()];
     for (ch, samples) in smaj.chunks_exact(sframes).enumerate() {

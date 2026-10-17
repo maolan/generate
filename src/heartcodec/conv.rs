@@ -1,15 +1,14 @@
 use burn::module::{Module, Param};
-use burn::prelude::Backend;
 use burn::tensor::Tensor;
 use burn::tensor::module::{conv_transpose1d, conv1d};
 use burn::tensor::ops::{ConvOptions, ConvTransposeOptions, PadMode};
 
 #[derive(Module, Debug)]
-pub struct WNConv1d<B: Backend> {
-    pub bias: Param<Tensor<B, 1>>,
+pub struct WNConv1d {
+    pub bias: Param<Tensor<1>>,
 
-    pub weight_g: Param<Tensor<B, 3>>,
-    pub weight_v: Param<Tensor<B, 3>>,
+    pub weight_g: Param<Tensor<3>>,
+    pub weight_v: Param<Tensor<3>>,
 
     pub stride: usize,
     pub padding: usize,
@@ -18,10 +17,10 @@ pub struct WNConv1d<B: Backend> {
     pub causal: bool,
 }
 
-impl<B: Backend> WNConv1d<B> {
+impl WNConv1d {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        device: &B::Device,
+        device: &burn::tensor::Device,
         in_channels: usize,
         out_channels: usize,
         kernel_size: usize,
@@ -48,7 +47,7 @@ impl<B: Backend> WNConv1d<B> {
         }
     }
 
-    fn compute_weight(&self) -> Tensor<B, 3> {
+    fn compute_weight(&self) -> Tensor<3> {
         let g = self.weight_g.val();
         let v = self.weight_v.val();
 
@@ -61,7 +60,7 @@ impl<B: Backend> WNConv1d<B> {
         g * v / (v_norm + 1e-12)
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         let weight = self.compute_weight();
         let bias = self.bias.val();
 
@@ -91,11 +90,11 @@ impl<B: Backend> WNConv1d<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct WNConvTranspose1d<B: Backend> {
-    pub bias: Param<Tensor<B, 1>>,
+pub struct WNConvTranspose1d {
+    pub bias: Param<Tensor<1>>,
 
-    pub weight_g: Param<Tensor<B, 3>>,
-    pub weight_v: Param<Tensor<B, 3>>,
+    pub weight_g: Param<Tensor<3>>,
+    pub weight_v: Param<Tensor<3>>,
 
     pub stride: usize,
     pub padding: usize,
@@ -105,10 +104,10 @@ pub struct WNConvTranspose1d<B: Backend> {
     pub causal: bool,
 }
 
-impl<B: Backend> WNConvTranspose1d<B> {
+impl WNConvTranspose1d {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        device: &B::Device,
+        device: &burn::tensor::Device,
         in_channels: usize,
         out_channels: usize,
         kernel_size: usize,
@@ -135,7 +134,7 @@ impl<B: Backend> WNConvTranspose1d<B> {
         }
     }
 
-    fn compute_weight(&self) -> Tensor<B, 3> {
+    fn compute_weight(&self) -> Tensor<3> {
         let g = self.weight_g.val();
         let v = self.weight_v.val();
 
@@ -148,7 +147,7 @@ impl<B: Backend> WNConvTranspose1d<B> {
         g * v / (v_norm + 1e-12)
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         let weight = self.compute_weight();
         let bias = self.bias.val();
 
@@ -182,26 +181,26 @@ pub struct WNConv1dLoadArgs {
     pub bias: Option<(Vec<f32>, Vec<usize>)>,
 }
 
-pub fn load_wnconv_from_tensors<B: Backend>(
-    device: &B::Device,
+pub fn load_wnconv_from_tensors(
+    device: &burn::tensor::Device,
     args: WNConv1dLoadArgs,
-) -> anyhow::Result<WNConv1d<B>> {
+) -> anyhow::Result<WNConv1d> {
     use burn::tensor::TensorData;
 
     let (g_data, g_shape) = args.weight_g;
-    let weight_g_tensor = Tensor::<B, 3>::from_data(
+    let weight_g_tensor = Tensor::<3>::from_data(
         TensorData::new(g_data, [g_shape[0], g_shape[1], g_shape[2]]),
         device,
     );
 
     let (v_data, v_shape) = args.weight_v;
-    let weight_v_tensor = Tensor::<B, 3>::from_data(
+    let weight_v_tensor = Tensor::<3>::from_data(
         TensorData::new(v_data, [v_shape[0], v_shape[1], v_shape[2]]),
         device,
     );
 
     let bias_tensor = if let Some((b_data, b_shape)) = args.bias {
-        Tensor::<B, 1>::from_data(TensorData::new(b_data, [b_shape[0]]), device)
+        Tensor::<1>::from_data(TensorData::new(b_data, [b_shape[0]]), device)
     } else {
         Tensor::zeros([args.out_channels], device)
     };
@@ -228,26 +227,26 @@ pub struct WNConvTranspose1dLoadArgs {
     pub bias: Option<(Vec<f32>, Vec<usize>)>,
 }
 
-pub fn load_wnconv_transpose_from_tensors<B: Backend>(
-    device: &B::Device,
+pub fn load_wnconv_transpose_from_tensors(
+    device: &burn::tensor::Device,
     args: WNConvTranspose1dLoadArgs,
-) -> anyhow::Result<WNConvTranspose1d<B>> {
+) -> anyhow::Result<WNConvTranspose1d> {
     use burn::tensor::TensorData;
 
     let (g_data, g_shape) = args.weight_g;
-    let weight_g_tensor = Tensor::<B, 3>::from_data(
+    let weight_g_tensor = Tensor::<3>::from_data(
         TensorData::new(g_data, [g_shape[0], g_shape[1], g_shape[2]]),
         device,
     );
 
     let (v_data, v_shape) = args.weight_v;
-    let weight_v_tensor = Tensor::<B, 3>::from_data(
+    let weight_v_tensor = Tensor::<3>::from_data(
         TensorData::new(v_data, [v_shape[0], v_shape[1], v_shape[2]]),
         device,
     );
 
     let bias_tensor = if let Some((b_data, b_shape)) = args.bias {
-        Tensor::<B, 1>::from_data(TensorData::new(b_data, [b_shape[0]]), device)
+        Tensor::<1>::from_data(TensorData::new(b_data, [b_shape[0]]), device)
     } else {
         Tensor::zeros([args.out_channels], device)
     };
@@ -265,15 +264,15 @@ pub fn load_wnconv_transpose_from_tensors<B: Backend>(
     })
 }
 
-pub fn load_prelu_from_tensor<B: Backend>(
-    device: &B::Device,
+pub fn load_prelu_from_tensor(
+    device: &burn::tensor::Device,
     data: Vec<f32>,
     shape: Vec<usize>,
-) -> anyhow::Result<super::PReLU<B>> {
+) -> anyhow::Result<super::PReLU> {
     use burn::module::Param;
     use burn::tensor::TensorData;
 
-    let tensor = Tensor::<B, 1>::from_data(TensorData::new(data, [shape[0]]), device);
+    let tensor = Tensor::<1>::from_data(TensorData::new(data, [shape[0]]), device);
 
     Ok(super::PReLU {
         weight: Param::from_tensor(tensor),
@@ -281,9 +280,9 @@ pub fn load_prelu_from_tensor<B: Backend>(
 }
 
 #[derive(Module, Debug)]
-pub struct PlainConv1d<B: Backend> {
-    pub weight: Param<Tensor<B, 3>>,
-    pub bias: Param<Tensor<B, 1>>,
+pub struct PlainConv1d {
+    pub weight: Param<Tensor<3>>,
+    pub bias: Param<Tensor<1>>,
 
     pub stride: usize,
     pub padding: usize,
@@ -293,14 +292,14 @@ pub struct PlainConv1d<B: Backend> {
 }
 
 #[derive(Module, Debug)]
-pub struct PostProcessor<B: Backend> {
-    pub conv: PlainConv1d<B>,
-    pub activation: super::PReLU<B>,
+pub struct PostProcessor {
+    pub conv: PlainConv1d,
+    pub activation: super::PReLU,
     pub num_samples: usize,
 }
 
-impl<B: Backend> PostProcessor<B> {
-    pub fn new(device: &B::Device, channels: usize, num_samples: usize) -> Self {
+impl PostProcessor {
+    pub fn new(device: &burn::tensor::Device, channels: usize, num_samples: usize) -> Self {
         Self {
             conv: PlainConv1d::new(device, channels, channels, 7, 1, 3, 1, 1, true),
             activation: super::PReLU::new(device),
@@ -309,7 +308,7 @@ impl<B: Backend> PostProcessor<B> {
     }
 
     pub fn load_from_tensors<F>(
-        device: &B::Device,
+        device: &burn::tensor::Device,
         get_tensor: &F,
         prefix: &str,
         channels: usize,
@@ -347,13 +346,13 @@ impl<B: Backend> PostProcessor<B> {
         })
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         let [batch, channels, time] = x.dims();
         let x = x.swap_dims(1, 2);
         let x = if self.num_samples <= 1 {
             x
         } else {
-            let repeated: Tensor<B, 4> = x.unsqueeze_dim::<4>(2).repeat_dim(2, self.num_samples);
+            let repeated: Tensor<4> = x.unsqueeze_dim::<4>(2).repeat_dim(2, self.num_samples);
             repeated.reshape([batch, time * self.num_samples, channels])
         };
         let x = x.swap_dims(1, 2);
@@ -362,10 +361,10 @@ impl<B: Backend> PostProcessor<B> {
     }
 }
 
-impl<B: Backend> PlainConv1d<B> {
+impl PlainConv1d {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        device: &B::Device,
+        device: &burn::tensor::Device,
         in_channels: usize,
         out_channels: usize,
         kernel_size: usize,
@@ -391,7 +390,7 @@ impl<B: Backend> PlainConv1d<B> {
         }
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         let weight = self.weight.val();
         let bias = self.bias.val();
         let left_padding = if self.causal {
@@ -427,20 +426,20 @@ pub struct Conv1dLoadArgs {
     pub bias: Option<(Vec<f32>, Vec<usize>)>,
 }
 
-pub fn load_conv1d_from_tensors<B: Backend>(
-    device: &B::Device,
+pub fn load_conv1d_from_tensors(
+    device: &burn::tensor::Device,
     args: Conv1dLoadArgs,
-) -> anyhow::Result<PlainConv1d<B>> {
+) -> anyhow::Result<PlainConv1d> {
     use burn::tensor::TensorData;
 
     let (w_data, w_shape) = args.weight;
-    let weight_tensor = Tensor::<B, 3>::from_data(
+    let weight_tensor = Tensor::<3>::from_data(
         TensorData::new(w_data, [w_shape[0], w_shape[1], w_shape[2]]),
         device,
     );
 
     let bias_tensor = if let Some((b_data, b_shape)) = args.bias {
-        Tensor::<B, 1>::from_data(TensorData::new(b_data, [b_shape[0]]), device)
+        Tensor::<1>::from_data(TensorData::new(b_data, [b_shape[0]]), device)
     } else {
         Tensor::zeros([args.out_channels], device)
     };
@@ -460,10 +459,8 @@ pub fn load_conv1d_from_tensors<B: Backend>(
 mod tests {
     #[test]
     fn transposed_conv_uses_burn_channel_layout() {
-        let device = burn::backend::ndarray::NdArrayDevice::default();
-        let layer = super::WNConvTranspose1d::<burn::backend::ndarray::NdArray<f32>>::new(
-            &device, 128, 2048, 5, 1, 2, 0, 1, 1, false,
-        );
+        let device = burn::tensor::Device::flex();
+        let layer = super::WNConvTranspose1d::new(&device, 128, 2048, 5, 1, 2, 0, 1, 1, false);
 
         assert_eq!(layer.weight_g.val().dims(), [128, 1, 1]);
         assert_eq!(layer.weight_v.val().dims(), [128, 2048, 5]);

@@ -18,7 +18,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use burn::module::{Module, Param};
-use burn::prelude::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_store::{BurnpackStore, ModuleStore};
 
@@ -232,27 +231,26 @@ impl AceStepModelPaths {
 /// (`silence_latent.bpk`, f32, shape [1, S, 64]): VAE-encoded silence used as
 /// the timbre reference for text2music.
 #[derive(Module, Debug)]
-pub struct SilenceLatent<B: Backend> {
-    pub silence_latent: Param<Tensor<B, 3>>,
+pub struct SilenceLatent {
+    pub silence_latent: Param<Tensor<3>>,
 }
 
-impl<B: Backend> SilenceLatent<B> {
-    pub fn from_burnpack(path: &Path, device: &B::Device) -> Result<Self> {
+impl SilenceLatent {
+    pub fn from_burnpack(path: &Path, device: &burn::tensor::Device) -> Result<Self> {
         // Load the snapshot directly: the frame count S is only known from the
         // file, so shape-validating module load (which needs a pre-built
         // placeholder of the right shape) cannot work here.
         let data = BurnpackStore::from_file(path)
-            .zero_copy(true)
-            .get_all_snapshots()
+            .get_all_tensors()
             .with_context(|| format!("failed to read snapshots from {}", path.display()))?
             .iter()
             .find_map(|(_, snap)| {
-                (snap.full_path() == "silence_latent").then(|| snap.to_data().ok())
+                (snap.name == "silence_latent").then(|| burn_store::bridge::to_data(snap).ok())
             })
             .flatten()
             .ok_or_else(|| anyhow::anyhow!("missing silence_latent tensor in {}", path.display()))?
             .convert::<f32>();
-        let tensor = Tensor::<B, 3>::from_data(data, device);
+        let tensor = Tensor::<3>::from_data(data, device);
         Ok(Self {
             silence_latent: Param::from_tensor(tensor),
         })
@@ -260,13 +258,13 @@ impl<B: Backend> SilenceLatent<B> {
 
     /// Latent frames tiled/repeated along dim 1 and cropped to exactly
     /// `frames` frames.
-    pub fn slice(&self, frames: usize) -> Tensor<B, 3> {
+    pub fn slice(&self, frames: usize) -> Tensor<3> {
         tile_frames(self.silence_latent.val(), frames)
     }
 
     /// The timbre reference: the first [`TIMBRE_REFERENCE_FRAMES`] frames,
     /// tiled if the stored latent is shorter.
-    pub fn timbre_reference(&self) -> Tensor<B, 3> {
+    pub fn timbre_reference(&self) -> Tensor<3> {
         self.slice(TIMBRE_REFERENCE_FRAMES)
     }
 }
@@ -342,21 +340,21 @@ pub struct AceStepTrace {
 /// (e.g. 4B LM in f32 ≈ 17 GB) would not fit in VRAM alongside everything
 /// else, so the LM is loaded on demand in [`Self::plan_codes`] and dropped
 /// right after use; peak residency stays at max(LM, everything-else).
-pub struct AceStepPipeline<B: Backend> {
+pub struct AceStepPipeline {
     /// Resolved model paths (kept for the LM tokenizer path).
     pub paths: AceStepModelPaths,
     /// Device all components live on (also used for the on-demand LM stage).
-    pub device: B::Device,
+    pub device: burn::tensor::Device,
     /// Qwen3-Embedding text encoder (bidirectional).
-    pub text_encoder: Qwen3Model<B>,
+    pub text_encoder: Qwen3Model,
     /// Condition stack (text projector, lyric/timbre encoders, detokenizer).
-    pub condition: AceStepCondition<B>,
+    pub condition: AceStepCondition,
     /// Turbo DiT decoder.
-    pub dit: AceStepDiT<B>,
+    pub dit: AceStepDiT,
     /// Oobleck VAE decoder.
-    pub vae: OobleckDecoder<B>,
+    pub vae: OobleckDecoder,
     /// VAE-encoded silence used as the timbre reference.
-    pub silence: SilenceLatent<B>,
+    pub silence: SilenceLatent,
     /// DiT/condition config.
     pub dit_config: AceStepConfig,
     /// VAE config.
@@ -372,13 +370,13 @@ pub struct AceStepPipeline<B: Backend> {
     text_tokenizer: tokie::Tokenizer,
 }
 
-impl<B: Backend> AceStepPipeline<B> {
+impl AceStepPipeline {
     /// Load every component except the LM planner (see the struct docs for
     /// the staging rationale), reporting `(loading, fraction, component)`
     /// along the way.
     pub fn load(
         paths: &AceStepModelPaths,
-        device: &B::Device,
+        device: &burn::tensor::Device,
         progress: &mut dyn FnMut(&str, f32, &str),
     ) -> Result<Self> {
         progress("loading", 0.0, "text encoder config");
@@ -465,17 +463,15 @@ impl<B: Backend> AceStepPipeline<B> {
         let lm_config = Qwen3Config::load(&self.paths.lm_config)?;
 
         let use_f16 = self.lm_f16
-            && B::name(&self.device).contains("wgpu")
+            && matches!(
+                self.device.as_dispatch(),
+                burn::backend::DispatchDevice::Cube(burn::backend::CubeDevice::Wgpu(_))
+            )
             && std::env::var_os("MAOLAN_ACESTEP_LM_F32").is_none();
         let codes = if use_f16 {
             progress("loading", 0.05, "lm planner weights (f16)");
-            let device = Default::default();
-            let lm =
-                AceStepLm::<burn::backend::Wgpu<burn::tensor::f16, i64, u32>>::from_burnpack_cast(
-                    &lm_config,
-                    &self.paths.lm_bpk,
-                    &device,
-                )?;
+            let device = self.device.clone();
+            let lm = AceStepLm::from_burnpack_cast(&lm_config, &self.paths.lm_bpk, &device)?;
             let codes = {
                 let mut lm_progress = |done: usize, total: usize| {
                     let fraction = if total == 0 {
@@ -494,11 +490,11 @@ impl<B: Backend> AceStepPipeline<B> {
                 )
             };
             drop(lm);
-            burn::backend::Wgpu::<burn::tensor::f16, i64, u32>::memory_cleanup(&device);
+            device.memory_cleanup();
             codes
         } else {
             progress("loading", 0.05, "lm planner weights");
-            let lm = AceStepLm::<B>::from_burnpack(&lm_config, &self.paths.lm_bpk, &self.device)?;
+            let lm = AceStepLm::from_burnpack(&lm_config, &self.paths.lm_bpk, &self.device)?;
             let codes = {
                 let mut lm_progress = |done: usize, total: usize| {
                     let fraction = if total == 0 {
@@ -517,7 +513,7 @@ impl<B: Backend> AceStepPipeline<B> {
                 )
             };
             drop(lm);
-            B::memory_cleanup(&self.device);
+            self.device.memory_cleanup();
             codes
         };
         Ok((codes, cot, prompt))
@@ -539,7 +535,7 @@ impl<B: Backend> AceStepPipeline<B> {
         duration_ms: usize,
         seed: u64,
         progress: &mut dyn FnMut(&str, f32, &str),
-    ) -> Result<(Tensor<B, 3>, GenerateAudioMeta)> {
+    ) -> Result<(Tensor<3>, GenerateAudioMeta)> {
         self.generate_impl(caption, metadata, duration_ms, seed, progress, None)
     }
 
@@ -553,7 +549,7 @@ impl<B: Backend> AceStepPipeline<B> {
         seed: u64,
         progress: &mut dyn FnMut(&str, f32, &str),
         trace: &mut AceStepTrace,
-    ) -> Result<(Tensor<B, 3>, GenerateAudioMeta)> {
+    ) -> Result<(Tensor<3>, GenerateAudioMeta)> {
         self.generate_impl(caption, metadata, duration_ms, seed, progress, Some(trace))
     }
 
@@ -565,7 +561,7 @@ impl<B: Backend> AceStepPipeline<B> {
         seed: u64,
         progress: &mut dyn FnMut(&str, f32, &str),
         mut trace: Option<&mut AceStepTrace>,
-    ) -> Result<(Tensor<B, 3>, GenerateAudioMeta)> {
+    ) -> Result<(Tensor<3>, GenerateAudioMeta)> {
         let acoustic_dim = self.dit_config.audio_acoustic_hidden_dim;
         let latent_frames = latent_frames_for_duration(duration_ms);
         let duration_s = duration_ms / 1000;
@@ -597,7 +593,7 @@ impl<B: Backend> AceStepPipeline<B> {
         let prompt_tokens = ids.len();
         let ids: Vec<i64> = ids.into_iter().map(i64::from).collect();
         let ids_tensor =
-            Tensor::<B, 2, Int>::from_data(TensorData::new(ids, [1, prompt_tokens]), &device);
+            Tensor::<2, Int>::from_data(TensorData::new(ids, [1, prompt_tokens]), &device);
         progress("text-encoder", 0.3, "encoding caption");
         let text_hidden = self.text_encoder.forward(ids_tensor, true);
 
@@ -612,12 +608,12 @@ impl<B: Backend> AceStepPipeline<B> {
         let lyric_len = lyric_ids.len();
         let lyric_ids: Vec<i64> = lyric_ids.into_iter().map(i64::from).collect();
         let lyric_ids_tensor =
-            Tensor::<B, 2, Int>::from_data(TensorData::new(lyric_ids, [1, lyric_len]), &device);
+            Tensor::<2, Int>::from_data(TensorData::new(lyric_ids, [1, lyric_len]), &device);
         // Lyric branch: RAW embedding-table lookup of the lyric tokens — the
         // official `infer_lyric_embeddings` is `text_encoder.embed_tokens(ids)`
         // with NO transformer forward.
         let lyric_hidden = self.text_encoder.embed_tokens.forward(lyric_ids_tensor);
-        let lyric_mask = Tensor::<B, 2, Int>::ones([1, lyric_len], &device);
+        let lyric_mask = Tensor::<2, Int>::ones([1, lyric_len], &device);
         progress("text-encoder", 1.0, "caption encoded");
 
         progress("condition", 0.0, "encoding conditions");
@@ -633,7 +629,7 @@ impl<B: Backend> AceStepPipeline<B> {
                 .clone()
                 .into_data()
                 .convert::<f32>()
-                .to_vec()
+                .try_to_vec()
                 .map_err(|e| anyhow::anyhow!("failed to read encoder states: {e}"))?;
             let mean = values.iter().sum::<f32>() / values.len() as f32;
             let var =
@@ -665,7 +661,7 @@ impl<B: Backend> AceStepPipeline<B> {
         let expected = lm::code_count_for_duration(duration_s).max(1);
         let codes = pad_or_truncate_codes(codes, expected);
         let codes_tensor =
-            Tensor::<B, 2, Int>::from_data(TensorData::new(codes, [1, expected]), &device);
+            Tensor::<2, Int>::from_data(TensorData::new(codes, [1, expected]), &device);
         let hints = self.condition.codes_to_hints(codes_tensor);
         // Short hints are padded with silence (the official `silence_latent`
         // filler), long ones cropped — never tiled.
@@ -773,24 +769,24 @@ fn latent_frames_for_duration(duration_ms: usize) -> usize {
 }
 
 /// Host-side RMS of a rank-3 tensor.
-fn tensor_rms<B: Backend>(tensor: &Tensor<B, 3>) -> Result<f32> {
+fn tensor_rms(tensor: &Tensor<3>) -> Result<f32> {
     let values: Vec<f32> = tensor
         .clone()
         .into_data()
         .convert::<f32>()
-        .to_vec()
+        .try_to_vec()
         .map_err(|e| anyhow::anyhow!("failed to read tensor: {e}"))?;
     Ok((values.iter().map(|v| v * v).sum::<f32>() / values.len() as f32).sqrt())
 }
 
 /// Convert `[1, channels, frames]` audio into interleaved host samples:
 /// `(interleaved, channels, frames)`.
-fn interleave_channel_major<B: Backend>(audio: Tensor<B, 3>) -> Result<(Vec<f32>, usize, usize)> {
+fn interleave_channel_major(audio: Tensor<3>) -> Result<(Vec<f32>, usize, usize)> {
     let [_, channels, frames] = audio.dims();
     let channel_major: Vec<f32> = audio
         .into_data()
         .convert::<f32>()
-        .to_vec()
+        .try_to_vec()
         .map_err(|e| anyhow::anyhow!("failed to read audio tensor: {e}"))?;
     let mut interleaved = vec![0.0_f32; channel_major.len()];
     for (channel, samples) in channel_major.chunks_exact(frames).enumerate() {
@@ -861,7 +857,7 @@ fn pad_or_truncate_codes(mut codes: Vec<u32>, expected: usize) -> Vec<u32> {
 
 /// Tile/repeat a `[1, T, D]` latent along dim 1 and crop to exactly `frames`
 /// frames. Panics on a zero-length input (callers guarantee `T >= 1`).
-pub fn tile_frames<B: Backend>(tensor: Tensor<B, 3>, frames: usize) -> Tensor<B, 3> {
+pub fn tile_frames(tensor: Tensor<3>, frames: usize) -> Tensor<3> {
     let len = tensor.dims()[1];
     assert!(len > 0, "cannot tile an empty latent");
     if len == frames {
@@ -879,14 +875,14 @@ pub fn tile_frames<B: Backend>(tensor: Tensor<B, 3>, frames: usize) -> Tensor<B,
 /// Seeded standard-normal latent of shape `[1, frames, channels]`, using the
 /// splitmix64 + Box-Muller scheme from the HeartMuLa runtime so the same seed
 /// reproduces the same noise on every backend.
-pub fn seeded_latent_noise<B: Backend>(
+pub fn seeded_latent_noise(
     seed: u64,
     frames: usize,
     channels: usize,
-    device: &B::Device,
-) -> Tensor<B, 3> {
+    device: &burn::tensor::Device,
+) -> Tensor<3> {
     let data = generate_gaussian_data(seed, frames * channels);
-    Tensor::<B, 3>::from_data(TensorData::new(data, [1, frames, channels]), device)
+    Tensor::<3>::from_data(TensorData::new(data, [1, frames, channels]), device)
 }
 
 fn generate_gaussian_data(seed: u64, len: usize) -> Vec<f32> {
@@ -922,9 +918,6 @@ fn splitmix64_next(state: &mut u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::NdArray;
-
-    type TestBackend = NdArray<f32>;
 
     #[test]
     fn metas_block_matches_official_format() {
@@ -998,8 +991,8 @@ mod tests {
 
     #[test]
     fn tile_frames_tiles_and_crops() {
-        let device = Default::default();
-        let tensor = Tensor::<TestBackend, 3>::from_data(
+        let device = burn::tensor::Device::flex();
+        let tensor = Tensor::<3>::from_data(
             [[
                 [1.0, 10.0, 100.0, 1000.0],
                 [2.0, 20.0, 200.0, 2000.0],
@@ -1011,7 +1004,7 @@ mod tests {
         // Tiling: 3 frames -> 7 frames repeats 0,1,2,0,1,2,0.
         let tiled = tile_frames(tensor.clone(), 7);
         assert_eq!(tiled.dims(), [1, 7, 4]);
-        let values = tiled.to_data().to_vec::<f32>().expect("tiled values");
+        let values = tiled.to_data().try_to_vec::<f32>().expect("tiled values");
         for frame in 0..7 {
             let source = frame % 3;
             assert_eq!(values[frame * 4], (source + 1) as f32);
@@ -1020,7 +1013,10 @@ mod tests {
         // Cropping: 3 frames -> 2 frames keeps the prefix.
         let cropped = tile_frames(tensor.clone(), 2);
         assert_eq!(cropped.dims(), [1, 2, 4]);
-        let values = cropped.to_data().to_vec::<f32>().expect("cropped values");
+        let values = cropped
+            .to_data()
+            .try_to_vec::<f32>()
+            .expect("cropped values");
         assert_eq!(values[0], 1.0);
         assert_eq!(values[4], 2.0);
 
@@ -1030,8 +1026,8 @@ mod tests {
 
     #[test]
     fn silence_latent_slice_and_timbre_reference_tile() {
-        let device = Default::default();
-        let tensor = Tensor::<TestBackend, 3>::from_data(
+        let device = burn::tensor::Device::flex();
+        let tensor = Tensor::<3>::from_data(
             [[
                 [1.0, 2.0, 3.0, 4.0],
                 [5.0, 6.0, 7.0, 8.0],
@@ -1039,13 +1035,13 @@ mod tests {
             ]],
             &device,
         );
-        let silence = SilenceLatent::<TestBackend> {
+        let silence = SilenceLatent {
             silence_latent: Param::from_tensor(tensor),
         };
 
         let sliced = silence.slice(5);
         assert_eq!(sliced.dims(), [1, 5, 4]);
-        let values = sliced.to_data().to_vec::<f32>().expect("slice values");
+        let values = sliced.to_data().try_to_vec::<f32>().expect("slice values");
         // Frames repeat 0,1,2,0,1.
         assert_eq!(&values[0..4], &[1.0, 2.0, 3.0, 4.0]);
         assert_eq!(&values[12..16], &[1.0, 2.0, 3.0, 4.0]);
@@ -1055,7 +1051,7 @@ mod tests {
         assert_eq!(reference.dims(), [1, TIMBRE_REFERENCE_FRAMES, 4]);
         let values = reference
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("reference values");
         // Frame 750 wraps back to frame 0 (750 % 3 == 0).
         let last = &values[(TIMBRE_REFERENCE_FRAMES - 1) * 4..];
@@ -1064,12 +1060,12 @@ mod tests {
 
     #[test]
     fn seeded_noise_is_deterministic_and_normal_shaped() {
-        let device = Default::default();
-        let first = seeded_latent_noise::<TestBackend>(42, 6, 4, &device);
-        let second = seeded_latent_noise::<TestBackend>(42, 6, 4, &device);
+        let device = burn::tensor::Device::flex();
+        let first = seeded_latent_noise(42, 6, 4, &device);
+        let second = seeded_latent_noise(42, 6, 4, &device);
         assert_eq!(first.dims(), [1, 6, 4]);
-        let a = first.to_data().to_vec::<f32>().expect("first noise");
-        let b = second.to_data().to_vec::<f32>().expect("second noise");
+        let a = first.to_data().try_to_vec::<f32>().expect("first noise");
+        let b = second.to_data().try_to_vec::<f32>().expect("second noise");
         assert_eq!(a, b, "same seed must reproduce the same noise");
         assert!(a.iter().all(|v| v.is_finite()));
         assert!(
@@ -1077,9 +1073,9 @@ mod tests {
             "noise must not be all zeros"
         );
 
-        let other = seeded_latent_noise::<TestBackend>(7, 6, 4, &device)
+        let other = seeded_latent_noise(7, 6, 4, &device)
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("other noise");
         assert_ne!(a, other, "different seeds must diverge");
     }

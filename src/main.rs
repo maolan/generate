@@ -1,6 +1,5 @@
 use anyhow::{Context, Result, anyhow};
-use burn::prelude::Backend;
-use burn_store::{BurnpackStore, ModuleStore, TensorSnapshot};
+use burn_store::{BurnpackStore, ModuleStore, burn_pack::Tensor as PackTensor};
 use huggingface_hub::HFClientSync;
 use maolan_generate::acestep::{
     AceStepModelPaths, AceStepPipeline, AceStepVariant, GenerateAudioMeta, GenerateMetadata,
@@ -92,11 +91,12 @@ fn main() -> Result<()> {
     run_heartmula_cli(&options)
 }
 
-fn vulkan_runtime_options() -> burn::backend::wgpu::RuntimeOptions {
-    burn::backend::wgpu::RuntimeOptions {
-        memory_config: burn::backend::wgpu::MemoryConfiguration::ExclusivePages,
-        ..Default::default()
-    }
+fn vulkan_device() -> Result<burn::tensor::Device> {
+    burn::tensor::Device::wgpu_options()
+        .graphics_api(burn::tensor::wgpu::WgpuBackend::Vulkan)
+        .memory_config(burn::tensor::wgpu::MemoryConfiguration::ExclusivePages)
+        .init()
+        .map_err(|error| anyhow!("Failed to initialize Vulkan: {error}"))
 }
 
 fn should_forward_ipc_progress(last_progress: Option<f32>, progress: f32) -> bool {
@@ -106,9 +106,9 @@ fn should_forward_ipc_progress(last_progress: Option<f32>, progress: f32) -> boo
     }
 }
 
-fn release_backend_allocations<B: Backend>(device: &B::Device) -> Result<()> {
-    B::sync(device)?;
-    B::memory_cleanup(device);
+fn release_backend_allocations(device: &burn::tensor::Device) -> Result<()> {
+    device.sync()?;
+    device.memory_cleanup();
     Ok(())
 }
 
@@ -132,18 +132,16 @@ fn run_decode_with_frames_json(
             .with_context(|| format!("failed to set decode thread count to {threads}"))?;
     }
     match options.backend {
-        BackendChoice::Cpu => run_decode_only_with_backend::<burn::backend::NdArray<f32>>(
+        BackendChoice::Cpu => run_decode_only_with_backend(
+            &burn::tensor::Device::flex(),
             options,
             &model_paths.heartcodec_model_dir,
             frames_json,
         ),
         BackendChoice::Vulkan => {
-            let device = burn::backend::wgpu::WgpuDevice::default();
-            burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
+            let device = vulkan_device()?;
+            run_decode_only_with_backend(
                 &device,
-                vulkan_runtime_options(),
-            );
-            run_decode_only_with_backend::<burn::backend::Wgpu<f32, i64, u32>>(
                 options,
                 &model_paths.heartcodec_model_dir,
                 frames_json,
@@ -152,22 +150,20 @@ fn run_decode_with_frames_json(
     }
 }
 
-fn run_decode_only_with_backend<B: Backend>(
+fn run_decode_only_with_backend(
+    device: &burn::tensor::Device,
     options: &maolan_generate::CliOptions,
     model_dir: &Path,
     frames_json: &Path,
-) -> Result<()>
-where
-    B::Device: Default,
-{
-    heartmula_runtime::decode_frames_to_wav::<B>(
+) -> Result<()> {
+    heartmula_runtime::decode_frames_to_wav(
         model_dir,
         backend_name(options.backend),
         "f32",
         frames_json,
         &options.output_path,
         options.length as f32 / 1000.0,
-        &Default::default(),
+        device,
         options.ode_steps,
         options.decoder_seed,
     )
@@ -233,21 +229,12 @@ fn run_ipc() -> Result<()> {
         ) {
             return match options.backend {
                 BackendChoice::Cpu => {
-                    let device = Default::default();
-                    run_acestep_ipc_with_backend::<burn::backend::NdArray<f32>>(
-                        &options,
-                        &device,
-                        BackendChoice::Cpu,
-                        &mut stdout,
-                    )
+                    let device = burn::tensor::Device::flex();
+                    run_acestep_ipc_with_backend(&options, &device, BackendChoice::Cpu, &mut stdout)
                 }
                 BackendChoice::Vulkan => {
-                    let device = burn::backend::wgpu::WgpuDevice::default();
-                    burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
-                        &device,
-                        vulkan_runtime_options(),
-                    );
-                    run_acestep_ipc_with_backend::<burn::backend::Wgpu<f32, i64, u32>>(
+                    let device = vulkan_device()?;
+                    run_acestep_ipc_with_backend(
                         &options,
                         &device,
                         BackendChoice::Vulkan,
@@ -258,21 +245,12 @@ fn run_ipc() -> Result<()> {
         }
         match options.backend {
             BackendChoice::Cpu => {
-                let device = Default::default();
-                run_heartmula_ipc_with_backend::<burn::backend::NdArray<f32>>(
-                    &options,
-                    &device,
-                    BackendChoice::Cpu,
-                    &mut stdout,
-                )
+                let device = burn::tensor::Device::flex();
+                run_heartmula_ipc_with_backend(&options, &device, BackendChoice::Cpu, &mut stdout)
             }
             BackendChoice::Vulkan => {
-                let device = burn::backend::wgpu::WgpuDevice::default();
-                burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
-                    &device,
-                    vulkan_runtime_options(),
-                );
-                run_heartmula_ipc_with_backend::<burn::backend::Wgpu<f32, i64, u32>>(
+                let device = vulkan_device()?;
+                run_heartmula_ipc_with_backend(
                     &options,
                     &device,
                     BackendChoice::Vulkan,
@@ -517,9 +495,9 @@ fn acestep_lm_size(options: &maolan_generate::CliOptions) -> AceStepLmSize {
     }
 }
 
-fn run_acestep_generation<B: Backend>(
+fn run_acestep_generation(
     options: &maolan_generate::CliOptions,
-    device: &B::Device,
+    device: &burn::tensor::Device,
     progress: &mut dyn FnMut(&str, f32, &str),
 ) -> Result<GenerateAudioMeta> {
     let lm_size = acestep_lm_size(options);
@@ -527,7 +505,7 @@ fn run_acestep_generation<B: Backend>(
         resolve_acestep_model_dir(options.model_dir.as_deref(), options.model, lm_size)?;
     let model_paths =
         AceStepModelPaths::resolve_for_lm(&model_dir, acestep_variant(options.model), lm_size)?;
-    let pipeline = AceStepPipeline::<B>::load(&model_paths, device, &mut *progress)?;
+    let pipeline = AceStepPipeline::load(&model_paths, device, &mut *progress)?;
     let metadata = GenerateMetadata {
         bpm: options.bpm,
         key_scale: options.key_scale.as_deref(),
@@ -541,14 +519,14 @@ fn run_acestep_generation<B: Backend>(
         &mut *progress,
     )?;
     drop(pipeline);
-    release_backend_allocations::<B>(device)?;
+    release_backend_allocations(device)?;
 
     progress("writer", 0.0, "Writing WAV");
     let [_, channels, frames] = audio.dims();
     let channel_major: Vec<f32> = audio
         .into_data()
         .convert::<f32>()
-        .to_vec()
+        .try_to_vec()
         .map_err(|err| anyhow!("failed to read generated audio tensor: {err}"))?;
     let mut interleaved = vec![0.0_f32; channel_major.len()];
     for (channel, samples) in channel_major.chunks_exact(frames).enumerate() {
@@ -567,9 +545,9 @@ fn run_acestep_generation<B: Backend>(
     Ok(meta)
 }
 
-fn run_acestep_ipc_with_backend<B: Backend>(
+fn run_acestep_ipc_with_backend(
     options: &maolan_generate::CliOptions,
-    device: &B::Device,
+    device: &burn::tensor::Device,
     backend: BackendChoice,
     stdout: &mut impl std::io::Write,
 ) -> Result<GeneratedOutput> {
@@ -589,7 +567,7 @@ fn run_acestep_ipc_with_backend<B: Backend>(
         }
     };
 
-    let meta = run_acestep_generation::<B>(options, device, &mut progress_callback)?;
+    let meta = run_acestep_generation(options, device, &mut progress_callback)?;
 
     let header = GenerateResponseHeader {
         backend,
@@ -627,30 +605,26 @@ fn run_acestep_cli(options: &maolan_generate::CliOptions) -> Result<()> {
     }
     match options.backend {
         BackendChoice::Cpu => {
-            let device = Default::default();
-            run_acestep_cli_with_backend::<burn::backend::NdArray<f32>>(options, &device)
+            let device = burn::tensor::Device::flex();
+            run_acestep_cli_with_backend(options, &device)
         }
         BackendChoice::Vulkan => {
-            let device = burn::backend::wgpu::WgpuDevice::default();
-            burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
-                &device,
-                vulkan_runtime_options(),
-            );
-            run_acestep_cli_with_backend::<burn::backend::Wgpu<f32, i64, u32>>(options, &device)
+            let device = vulkan_device()?;
+            run_acestep_cli_with_backend(options, &device)
         }
     }
 }
 
-fn run_acestep_cli_with_backend<B: Backend>(
+fn run_acestep_cli_with_backend(
     options: &maolan_generate::CliOptions,
-    device: &B::Device,
+    device: &burn::tensor::Device,
 ) -> Result<()> {
     let mut progress = |phase: &str, p: f32, op: &str| {
         if stderr_logging_enabled() {
             eprintln!("[{phase}] {:.0}% {op}", p * 100.0);
         }
     };
-    let meta = run_acestep_generation::<B>(options, device, &mut progress)?;
+    let meta = run_acestep_generation(options, device, &mut progress)?;
     println!(
         "wrote {} ({} channels, {} frames, {} Hz)",
         options.output_path.display(),
@@ -733,8 +707,8 @@ fn run_midi_llm_cli(options: &maolan_generate::CliOptions) -> Result<()> {
         .and_then(text_to_midi::TimeSignature::parse);
     match options.backend {
         BackendChoice::Cpu => {
-            let device = Default::default();
-            text_to_midi::generate_midi_file_with_llm::<burn::backend::NdArray<f32>>(
+            let device = burn::tensor::Device::flex();
+            text_to_midi::generate_midi_file_with_llm(
                 &config,
                 &device,
                 &options.prompt,
@@ -744,12 +718,8 @@ fn run_midi_llm_cli(options: &maolan_generate::CliOptions) -> Result<()> {
             )
         }
         BackendChoice::Vulkan => {
-            let device = burn::backend::wgpu::WgpuDevice::default();
-            burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
-                &device,
-                vulkan_runtime_options(),
-            );
-            text_to_midi::generate_midi_file_with_llm::<burn::backend::Wgpu<f32, i64, u32>>(
+            let device = vulkan_device()?;
+            text_to_midi::generate_midi_file_with_llm(
                 &config,
                 &device,
                 &options.prompt,
@@ -799,8 +769,8 @@ fn run_midi_llm_ipc(
 
     match options.backend {
         BackendChoice::Cpu => {
-            let device = Default::default();
-            text_to_midi::generate_midi_file_with_llm::<burn::backend::NdArray<f32>>(
+            let device = burn::tensor::Device::flex();
+            text_to_midi::generate_midi_file_with_llm(
                 &config,
                 &device,
                 &options.prompt,
@@ -810,12 +780,8 @@ fn run_midi_llm_ipc(
             )
         }
         BackendChoice::Vulkan => {
-            let device = burn::backend::wgpu::WgpuDevice::default();
-            burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
-                &device,
-                vulkan_runtime_options(),
-            );
-            text_to_midi::generate_midi_file_with_llm::<burn::backend::Wgpu<f32, i64, u32>>(
+            let device = vulkan_device()?;
+            text_to_midi::generate_midi_file_with_llm(
                 &config,
                 &device,
                 &options.prompt,
@@ -839,9 +805,9 @@ fn run_midi_llm_ipc(
     Ok(GeneratedOutput { header })
 }
 
-fn run_heartmula_ipc_with_backend<B: Backend>(
+fn run_heartmula_ipc_with_backend(
     options: &maolan_generate::CliOptions,
-    device: &B::Device,
+    device: &burn::tensor::Device,
     backend: BackendChoice,
     stdout: &mut impl std::io::Write,
 ) -> Result<GeneratedOutput> {
@@ -856,7 +822,7 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
     };
     write_ipc_message(stdout, &progress)?;
 
-    let model = heartmula_runtime::HeartmulaModel::<B>::from_burnpack(
+    let model = heartmula_runtime::HeartmulaModel::from_burnpack(
         &model_paths.heartmula_raw_bpk,
         device,
         runtime_summary.text_vocab_size,
@@ -909,7 +875,7 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
     std::mem::drop(generation_config);
 
     drop(model);
-    release_backend_allocations::<B>(device)?;
+    release_backend_allocations(device)?;
 
     let temp_dir = std::env::temp_dir();
     let unique = std::time::SystemTime::now()
@@ -928,7 +894,7 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
     };
     write_ipc_message(stdout, &progress)?;
 
-    heartmula_runtime::decode_frames_to_wav::<B>(
+    heartmula_runtime::decode_frames_to_wav(
         &model_paths.heartcodec_model_dir,
         backend_name(backend),
         "f32",
@@ -949,7 +915,7 @@ fn run_heartmula_ipc_with_backend<B: Backend>(
 
     let _ = std::fs::remove_file(&frames_json_path);
 
-    release_backend_allocations::<B>(device)?;
+    release_backend_allocations(device)?;
 
     let header = GenerateResponseHeader {
         backend,
@@ -991,17 +957,17 @@ fn summarize_burnpack(path: &Path, required_tensors: &[&str]) -> Result<()> {
     Ok(())
 }
 
-fn load_burnpack_snapshots(path: &Path) -> Result<BTreeMap<String, TensorSnapshot>> {
-    let mut store = BurnpackStore::from_file(path).zero_copy(true);
+fn load_burnpack_snapshots(path: &Path) -> Result<BTreeMap<String, PackTensor>> {
+    let mut store = BurnpackStore::from_file(path);
     store
-        .get_all_snapshots()
+        .get_all_tensors()
         .with_context(|| format!("failed to read snapshots from {}", path.display()))
         .cloned()
 }
 
 fn ensure_required_tensors_exist(
     path: &Path,
-    snapshots: &BTreeMap<String, TensorSnapshot>,
+    snapshots: &BTreeMap<String, PackTensor>,
     required_tensors: &[&str],
 ) -> Result<()> {
     let missing = required_tensors
@@ -1022,7 +988,7 @@ fn ensure_required_tensors_exist(
 
 fn load_selected_tensor_shapes(
     path: &Path,
-    snapshots: &BTreeMap<String, TensorSnapshot>,
+    snapshots: &BTreeMap<String, PackTensor>,
     tensor_names: &[&str],
 ) -> Result<BTreeMap<String, Vec<usize>>> {
     let mut shapes = BTreeMap::new();
@@ -1035,14 +1001,14 @@ fn load_selected_tensor_shapes(
                 tensor_name
             )
         })?;
-        let data = snapshot.to_data().with_context(|| {
+        let data = burn_store::bridge::to_data(snapshot).with_context(|| {
             format!(
                 "failed to materialize tensor {} from {}",
                 tensor_name,
                 path.display()
             )
         })?;
-        shapes.insert((*tensor_name).to_string(), data.shape.to_vec());
+        shapes.insert((*tensor_name).to_string(), data.shape().to_vec());
     }
 
     Ok(shapes)
@@ -1164,13 +1130,11 @@ fn run_heartmula_cli(options: &maolan_generate::CliOptions) -> Result<()> {
     }
 }
 
-fn run_heartmula_with_backend<B: Backend>(
+fn run_heartmula_with_backend(
+    device: &burn::tensor::Device,
     options: &maolan_generate::CliOptions,
     backend: BackendChoice,
-) -> Result<()>
-where
-    B::Device: Default,
-{
+) -> Result<()> {
     let model_paths = resolve_heartmula_model_paths(options.model_dir.as_deref(), options.model)?;
     let config = load_heartmula_gen_config(&model_paths.gen_config_json)?;
     let runtime_summary = inspect_heartmula_runtime(&model_paths)?;
@@ -1179,10 +1143,9 @@ where
         &model_paths.heartcodec_raw_bpk,
         heartcodec_required_tensors(),
     )?;
-    let device = Default::default();
-    let model = heartmula_runtime::HeartmulaModel::<B>::from_burnpack(
+    let model = heartmula_runtime::HeartmulaModel::from_burnpack(
         &model_paths.heartmula_raw_bpk,
-        &device,
+        device,
         runtime_summary.text_vocab_size,
         runtime_summary.audio_head_vocab_size,
     )?;
@@ -1209,25 +1172,25 @@ where
         cfg_scale: options.cfg_scale,
         progress_callback: None,
     };
-    let frames = model.generate_frames(&device, &mut generation_config)?;
+    let frames = model.generate_frames(device, &mut generation_config)?;
     let _generated_frame_count = frames.len();
     let frames_json_path = options.output_path.with_extension("frames.json");
     heartmula_runtime::write_frames_json(&frames_json_path, &lyrics, &tags, &frames)?;
     if env::var_os(HEARTMULA_GENERATE_ONLY_ENV).is_some() {
         drop(model);
-        release_backend_allocations::<B>(&device)?;
+        release_backend_allocations(device)?;
         return Ok(());
     }
     drop(model);
-    release_backend_allocations::<B>(&device)?;
-    heartmula_runtime::decode_frames_to_wav::<B>(
+    release_backend_allocations(device)?;
+    heartmula_runtime::decode_frames_to_wav(
         &model_paths.heartcodec_model_dir,
         backend_name(backend),
         "f32",
         &frames_json_path,
         &options.output_path,
         options.length as f32 / 1000.0,
-        &device,
+        device,
         options.ode_steps,
         options.decoder_seed,
     )?;
@@ -1235,16 +1198,12 @@ where
 }
 
 fn run_heartmula_cpu(options: &maolan_generate::CliOptions) -> Result<()> {
-    run_heartmula_with_backend::<burn::backend::NdArray<f32>>(options, BackendChoice::Cpu)
+    run_heartmula_with_backend(&burn::tensor::Device::flex(), options, BackendChoice::Cpu)
 }
 
 fn run_heartmula_vulkan(options: &maolan_generate::CliOptions) -> Result<()> {
-    let device = burn::backend::wgpu::WgpuDevice::default();
-    burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
-        &device,
-        vulkan_runtime_options(),
-    );
-    run_heartmula_with_backend::<burn::backend::Wgpu<f32, i64, u32>>(options, BackendChoice::Vulkan)
+    let device = vulkan_device()?;
+    run_heartmula_with_backend(&device, options, BackendChoice::Vulkan)
 }
 
 #[cfg(test)]

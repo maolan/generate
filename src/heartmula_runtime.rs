@@ -1,13 +1,11 @@
 use crate::heartcodec::frames_to_tensor;
 use anyhow::{Context, Result, anyhow};
 use burn::module::{
-    AutodiffModule, Content, Devices, EmptyRecord, Module, ModuleDisplay, ModuleDisplayDefault,
-    ModuleMapper, ModuleVisitor, Param, ParamId,
+    Content, Devices, Module, ModuleDisplay, ModuleDisplayDefault, ModuleMapper, ModuleVisitor,
+    Param, ParamId,
 };
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout};
-use burn::prelude::Backend;
 use burn::tensor::activation::{silu, softmax};
-use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::{Bool, DType, Int, Tensor, TensorData};
 use burn_store::{BurnpackStore, ModuleSnapshot, ModuleStore};
 use rayon::prelude::*;
@@ -155,69 +153,69 @@ pub struct HeartmulaGenerationConfig<'a> {
 }
 
 #[derive(Clone)]
-struct HeartmulaTransformerCache<B: Backend> {
-    layers: Vec<HeartmulaAttentionCache<B>>,
+struct HeartmulaTransformerCache {
+    layers: Vec<HeartmulaAttentionCache>,
 }
 
 #[derive(Clone)]
-struct HeartmulaAttentionCache<B: Backend> {
-    key: Option<Tensor<B, 4>>,
-    value: Option<Tensor<B, 4>>,
+struct HeartmulaAttentionCache {
+    key: Option<Tensor<4>>,
+    value: Option<Tensor<4>>,
 }
 
 #[derive(Clone, Debug)]
-struct SplitAudioEmbeddings<B: Backend> {
-    table: Option<Tensor<B, 2>>,
+struct SplitAudioEmbeddings {
+    table: Option<Tensor<2>>,
     vocab_size: usize,
 }
 
 #[derive(Module, Debug)]
-pub struct HeartmulaModel<B: Backend> {
-    pub text_embeddings: Embedding<B>,
-    audio_embeddings: SplitAudioEmbeddings<B>,
-    pub unconditional_text_embedding: Embedding<B>,
-    pub projection: Linear<B>,
-    pub codebook0_head: Linear<B>,
-    pub audio_head: Param<Tensor<B, 3>>,
-    pub muq_linear: Linear<B>,
-    pub backbone: HeartmulaTransformer<B>,
-    pub decoder: HeartmulaTransformer<B>,
+pub struct HeartmulaModel {
+    pub text_embeddings: Embedding,
+    audio_embeddings: SplitAudioEmbeddings,
+    pub unconditional_text_embedding: Embedding,
+    pub projection: Linear,
+    pub codebook0_head: Linear,
+    pub audio_head: Param<Tensor<3>>,
+    pub muq_linear: Linear,
+    pub backbone: HeartmulaTransformer,
+    pub decoder: HeartmulaTransformer,
 }
 
 #[derive(Module, Debug)]
-pub struct HeartmulaTransformer<B: Backend> {
-    pub layers: Vec<HeartmulaTransformerLayer<B>>,
-    pub norm: HeartmulaRmsNorm<B>,
+pub struct HeartmulaTransformer {
+    pub layers: Vec<HeartmulaTransformerLayer>,
+    pub norm: HeartmulaRmsNorm,
 }
 
 #[derive(Module, Debug)]
-pub struct HeartmulaTransformerLayer<B: Backend> {
-    pub attn: HeartmulaAttention<B>,
-    pub mlp: HeartmulaMlp<B>,
-    pub sa_norm: HeartmulaRmsNorm<B>,
-    pub mlp_norm: HeartmulaRmsNorm<B>,
+pub struct HeartmulaTransformerLayer {
+    pub attn: HeartmulaAttention,
+    pub mlp: HeartmulaMlp,
+    pub sa_norm: HeartmulaRmsNorm,
+    pub mlp_norm: HeartmulaRmsNorm,
 }
 
 #[derive(Module, Debug)]
-pub struct HeartmulaAttention<B: Backend> {
-    pub q_proj: Linear<B>,
-    pub k_proj: Linear<B>,
-    pub v_proj: Linear<B>,
-    pub output_proj: Linear<B>,
+pub struct HeartmulaAttention {
+    pub q_proj: Linear,
+    pub k_proj: Linear,
+    pub v_proj: Linear,
+    pub output_proj: Linear,
     #[module(skip)]
     meta: AttentionMeta,
 }
 
 #[derive(Module, Debug)]
-pub struct HeartmulaMlp<B: Backend> {
-    pub w1: Linear<B>,
-    pub w2: Linear<B>,
-    pub w3: Linear<B>,
+pub struct HeartmulaMlp {
+    pub w1: Linear,
+    pub w2: Linear,
+    pub w3: Linear,
 }
 
 #[derive(Module, Debug)]
-pub struct HeartmulaRmsNorm<B: Backend> {
-    pub scale: Param<Tensor<B, 1>>,
+pub struct HeartmulaRmsNorm {
+    pub scale: Param<Tensor<1>>,
     pub epsilon: f64,
 }
 
@@ -228,8 +226,12 @@ struct AttentionMeta {
     head_dim: usize,
 }
 
-impl<B: Backend> HeartmulaModel<B> {
-    pub fn new(device: &B::Device, text_vocab_size: usize, audio_vocab_size: usize) -> Self {
+impl HeartmulaModel {
+    pub fn new(
+        device: &burn::tensor::Device,
+        text_vocab_size: usize,
+        audio_vocab_size: usize,
+    ) -> Self {
         Self {
             text_embeddings: EmbeddingConfig::new(text_vocab_size, HEARTMULA_HIDDEN_SIZE)
                 .init(device),
@@ -264,25 +266,25 @@ impl<B: Backend> HeartmulaModel<B> {
 
     pub fn from_burnpack(
         path: &Path,
-        device: &B::Device,
+        device: &burn::tensor::Device,
         text_vocab_size: usize,
         audio_vocab_size: usize,
     ) -> Result<Self> {
         let mut model = Self::new(device, text_vocab_size, audio_vocab_size);
         let snapshots = BurnpackStore::from_file(path)
-            .zero_copy(true)
-            .get_all_snapshots()
+            .get_all_tensors()
             .with_context(|| format!("failed to read snapshots from {}", path.display()))?
             .clone();
         let audio_embedding_data = snapshots
             .iter()
             .find_map(|(_, snap)| {
-                (snap.full_path() == "audio_embeddings.weight").then(|| snap.to_data().ok())
+                (snap.name == "audio_embeddings.weight")
+                    .then(|| burn_store::bridge::to_data(snap).ok())
             })
             .flatten()
             .ok_or_else(|| anyhow!("missing audio_embeddings.weight in HeartMula burnpack"))?
             .convert::<f32>();
-        let mut store = BurnpackStore::from_file(path).zero_copy(true);
+        let mut store = BurnpackStore::from_file(path);
         model
             .load_from(&mut store)
             .with_context(|| format!("failed to load HeartMula weights from {}", path.display()))?;
@@ -293,7 +295,7 @@ impl<B: Backend> HeartmulaModel<B> {
 
     pub fn generate_frames(
         &self,
-        device: &B::Device,
+        device: &burn::tensor::Device,
         config: &mut HeartmulaGenerationConfig<'_>,
     ) -> Result<Vec<Vec<i64>>> {
         let normalized_tags =
@@ -314,7 +316,7 @@ impl<B: Backend> HeartmulaModel<B> {
             config.cfg_scale > 1.0,
             &mut backbone_cache,
         )?;
-        sync_and_cleanup_backend::<B>(device)?;
+        sync_and_cleanup_backend(device)?;
 
         const CHUNK_SIZE: usize = 12;
         let total_chunks = config.max_audio_frames.div_ceil(CHUNK_SIZE);
@@ -360,13 +362,13 @@ impl<B: Backend> HeartmulaModel<B> {
                 let next_position = (history.len() + frames.len() - 1) as i64;
                 last_hidden = self.backbone.forward_incremental(
                     next_hidden,
-                    single_position_tensor::<B>(next_position, device),
+                    single_position_tensor(next_position, device),
                     &mut backbone_cache,
                 )?;
-                sync_and_cleanup_backend::<B>(device)?;
+                sync_and_cleanup_backend(device)?;
             }
 
-            sync_and_cleanup_backend::<B>(device)?;
+            sync_and_cleanup_backend(device)?;
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
@@ -375,7 +377,7 @@ impl<B: Backend> HeartmulaModel<B> {
 
     pub fn debug_first_frame(
         &self,
-        device: &B::Device,
+        device: &burn::tensor::Device,
         config: &mut HeartmulaGenerationConfig<'_>,
     ) -> Result<HeartmulaFirstFrameDebug> {
         let normalized_tags =
@@ -387,8 +389,8 @@ impl<B: Backend> HeartmulaModel<B> {
             config.tags_ids,
         );
         let muq_index = normalized_tags.len();
-        let tokens = history_tokens_tensor::<B>(&history, device);
-        let tokens_mask = history_mask_tensor::<B>(&history, device);
+        let tokens = history_tokens_tensor(&history, device);
+        let tokens_mask = history_mask_tensor(&history, device);
         let history_hidden_cond = self.embed_history(tokens.clone(), tokens_mask.clone(), false);
         let mut history_hidden_for_debug = if config.cfg_scale > 1.0 {
             let history_hidden_uncond = self.embed_history(tokens, tokens_mask, true);
@@ -397,7 +399,7 @@ impl<B: Backend> HeartmulaModel<B> {
             history_hidden_cond
         };
         if Some(muq_index) == Some(muq_index) {
-            let muq_zero = Tensor::<B, 2>::zeros([1, HEARTMULA_MUQ_DIM], device);
+            let muq_zero = Tensor::<2>::zeros([1, HEARTMULA_MUQ_DIM], device);
             let muq_hidden =
                 self.muq_linear
                     .forward(muq_zero)
@@ -405,7 +407,7 @@ impl<B: Backend> HeartmulaModel<B> {
             history_hidden_for_debug = if config.cfg_scale > 1.0 {
                 let uncond_hidden = self
                     .unconditional_text_embedding
-                    .forward(Tensor::<B, 2, Int>::zeros([1, 1], device))
+                    .forward(Tensor::<2, Int>::zeros([1, 1], device))
                     .reshape([1, 1, HEARTMULA_HIDDEN_SIZE]);
                 let replacement = Tensor::cat(vec![muq_hidden, uncond_hidden], 0);
                 splice_sequence_token(history_hidden_for_debug, replacement, muq_index)
@@ -413,7 +415,7 @@ impl<B: Backend> HeartmulaModel<B> {
                 splice_sequence_token(history_hidden_for_debug, muq_hidden, muq_index)
             };
         }
-        let positions = position_tensor::<B>((0..history.len() as i64).collect(), device);
+        let positions = position_tensor((0..history.len() as i64).collect(), device);
         let layer0 = self
             .backbone
             .layers
@@ -545,7 +547,7 @@ impl<B: Backend> HeartmulaModel<B> {
                 second_layer0.attn.meta.num_kv_heads,
                 second_layer0.attn.meta.head_dim,
             ]);
-        let second_position_tensor = single_position_tensor::<B>(next_position, device);
+        let second_position_tensor = single_position_tensor(next_position, device);
         second_layer0_q = apply_scaled_rope(second_layer0_q, &second_position_tensor);
         second_layer0_k_unrepeated =
             apply_scaled_rope(second_layer0_k_unrepeated, &second_position_tensor);
@@ -664,7 +666,7 @@ impl<B: Backend> HeartmulaModel<B> {
         let second_decoder_input = self.projection.forward(second_decoder_input);
         let second_first_decoder_h = self.decoder.forward_prefill(
             second_decoder_input.clone(),
-            position_tensor::<B>(vec![0, 1], device),
+            position_tensor(vec![0, 1], device),
             &mut second_decoder_cache,
         )?;
         let mut second_decoder_layer0_step2_q_dims = Vec::new();
@@ -677,7 +679,7 @@ impl<B: Backend> HeartmulaModel<B> {
         let mut second_decoder_layer0_step2_full_k = Vec::new();
         let mut second_decoder_layer0_step2_full_v_dims = Vec::new();
         let mut second_decoder_layer0_step2_full_v = Vec::new();
-        let mut second_current_embed: Option<Tensor<B, 3>> = None;
+        let mut second_current_embed: Option<Tensor<3>> = None;
         let mut second_next_decoder_pos = 2_i64;
         for codebook in 1..HEARTMULA_AUDIO_CODEBOOKS {
             if codebook == 2 {
@@ -710,7 +712,7 @@ impl<B: Backend> HeartmulaModel<B> {
                     layer0.attn.meta.num_kv_heads,
                     layer0.attn.meta.head_dim,
                 ]);
-                let pos = single_position_tensor::<B>(second_next_decoder_pos, device);
+                let pos = single_position_tensor(second_next_decoder_pos, device);
                 q = apply_scaled_rope(q, &pos);
                 k_unrepeated = apply_scaled_rope(k_unrepeated, &pos);
                 let mut k = k_unrepeated.clone();
@@ -784,7 +786,7 @@ impl<B: Backend> HeartmulaModel<B> {
                 second_decoder_step_inputs.push(tensor_to_f32_vec(second_decoder_input.clone())?);
                 let second_last_decoder_h = self.decoder.forward_incremental(
                     second_decoder_input,
-                    single_position_tensor::<B>(second_next_decoder_pos, device),
+                    single_position_tensor(second_next_decoder_pos, device),
                     &mut second_decoder_cache,
                 )?;
                 second_decoder_step_hidden_dims.push(second_last_decoder_h.dims().to_vec());
@@ -836,10 +838,10 @@ impl<B: Backend> HeartmulaModel<B> {
         let decoder_input = self.projection.forward(decoder_input);
         let first_decoder_h = self.decoder.forward_prefill(
             decoder_input.clone(),
-            position_tensor::<B>(vec![0, 1], device),
+            position_tensor(vec![0, 1], device),
             &mut decoder_cache,
         )?;
-        let mut current_embed: Option<Tensor<B, 3>> = None;
+        let mut current_embed: Option<Tensor<3>> = None;
         let mut next_decoder_pos = 2_i64;
         for codebook in 1..HEARTMULA_AUDIO_CODEBOOKS {
             let head = self
@@ -866,7 +868,7 @@ impl<B: Backend> HeartmulaModel<B> {
                 decoder_step_inputs.push(tensor_to_f32_vec(decoder_input.clone())?);
                 let last_decoder_h = self.decoder.forward_incremental(
                     decoder_input,
-                    single_position_tensor::<B>(next_decoder_pos, device),
+                    single_position_tensor(next_decoder_pos, device),
                     &mut decoder_cache,
                 )?;
                 decoder_step_hidden_dims.push(last_decoder_h.dims().to_vec());
@@ -971,14 +973,14 @@ impl<B: Backend> HeartmulaModel<B> {
 
     fn prefill_backbone(
         &self,
-        device: &B::Device,
+        device: &burn::tensor::Device,
         history: &[[i64; HEARTMULA_PARALLEL_TOKENS]],
         muq_insert_index: Option<usize>,
         use_cfg: bool,
-        cache: &mut HeartmulaTransformerCache<B>,
-    ) -> Result<Tensor<B, 2>> {
-        let tokens = history_tokens_tensor::<B>(history, device);
-        let tokens_mask = history_mask_tensor::<B>(history, device);
+        cache: &mut HeartmulaTransformerCache,
+    ) -> Result<Tensor<2>> {
+        let tokens = history_tokens_tensor(history, device);
+        let tokens_mask = history_mask_tensor(history, device);
         let history_hidden_cond = self.embed_history(tokens.clone(), tokens_mask.clone(), false);
         let mut history_hidden = if use_cfg {
             let history_hidden_uncond = self.embed_history(tokens, tokens_mask, true);
@@ -988,7 +990,7 @@ impl<B: Backend> HeartmulaModel<B> {
         };
 
         if let Some(index) = muq_insert_index {
-            let muq_zero = Tensor::<B, 2>::zeros([1, HEARTMULA_MUQ_DIM], device);
+            let muq_zero = Tensor::<2>::zeros([1, HEARTMULA_MUQ_DIM], device);
             let muq_hidden =
                 self.muq_linear
                     .forward(muq_zero)
@@ -996,7 +998,7 @@ impl<B: Backend> HeartmulaModel<B> {
             history_hidden = if use_cfg {
                 let uncond_hidden = self
                     .unconditional_text_embedding
-                    .forward(Tensor::<B, 2, Int>::zeros([1, 1], device))
+                    .forward(Tensor::<2, Int>::zeros([1, 1], device))
                     .reshape([1, 1, HEARTMULA_HIDDEN_SIZE]);
                 let replacement = Tensor::cat(vec![muq_hidden, uncond_hidden], 0);
                 splice_sequence_token(history_hidden, replacement, index)
@@ -1005,15 +1007,15 @@ impl<B: Backend> HeartmulaModel<B> {
             };
         }
 
-        let positions = position_tensor::<B>((0..history.len() as i64).collect(), device);
+        let positions = position_tensor((0..history.len() as i64).collect(), device);
         self.backbone
             .forward_prefill(history_hidden, positions, cache)
     }
 
     fn decode_frame_from_last_hidden(
         &self,
-        device: &B::Device,
-        last_hidden: Tensor<B, 2>,
+        device: &burn::tensor::Device,
+        last_hidden: Tensor<2>,
         temperature: f32,
         topk: usize,
         cfg_scale: f32,
@@ -1061,10 +1063,10 @@ impl<B: Backend> HeartmulaModel<B> {
         let decoder_input = self.projection.forward(decoder_input);
         let first_decoder_h = self.decoder.forward_prefill(
             decoder_input,
-            position_tensor::<B>(vec![0, 1], device),
+            position_tensor(vec![0, 1], device),
             &mut decoder_cache,
         )?;
-        let mut current_embed: Option<Tensor<B, 3>> = None;
+        let mut current_embed: Option<Tensor<3>> = None;
         let mut next_decoder_pos = 2_i64;
         for codebook in 1..HEARTMULA_AUDIO_CODEBOOKS {
             let head = self
@@ -1085,7 +1087,7 @@ impl<B: Backend> HeartmulaModel<B> {
                 let decoder_input = self.projection.forward(embed);
                 let last_decoder_h = self.decoder.forward_incremental(
                     decoder_input,
-                    single_position_tensor::<B>(next_decoder_pos, device),
+                    single_position_tensor(next_decoder_pos, device),
                     &mut decoder_cache,
                 )?;
                 next_decoder_pos += 1;
@@ -1115,10 +1117,10 @@ impl<B: Backend> HeartmulaModel<B> {
 
     fn embed_history(
         &self,
-        tokens: Tensor<B, 3, Int>,
-        tokens_mask: Tensor<B, 3, Bool>,
+        tokens: Tensor<3, Int>,
+        tokens_mask: Tensor<3, Bool>,
         use_unconditional_text: bool,
-    ) -> Tensor<B, 3> {
+    ) -> Tensor<3> {
         let [batch, seq_len, _] = tokens.dims();
         let text_ids = tokens
             .clone()
@@ -1134,19 +1136,15 @@ impl<B: Backend> HeartmulaModel<B> {
         let offsets = (0..HEARTMULA_AUDIO_CODEBOOKS)
             .map(|index| (index * self.audio_vocab_size()) as i64)
             .collect::<Vec<_>>();
-        let offset_tensor =
-            Tensor::<B, 1, Int>::from_data(offsets.as_slice(), &tokens_mask.device()).reshape([
-                1,
-                1,
-                HEARTMULA_AUDIO_CODEBOOKS,
-            ]);
+        let offset_tensor = Tensor::<1, Int>::from_data(offsets.as_slice(), &tokens_mask.device())
+            .reshape([1, 1, HEARTMULA_AUDIO_CODEBOOKS]);
         let shifted_audio_ids = audio_ids
             .reshape([batch, seq_len, HEARTMULA_AUDIO_CODEBOOKS])
             .add(offset_tensor);
 
         let text_embeds = if use_unconditional_text {
             self.unconditional_text_embedding
-                .forward(Tensor::<B, 2, Int>::zeros(
+                .forward(Tensor::<2, Int>::zeros(
                     [batch, seq_len],
                     &tokens_mask.device(),
                 ))
@@ -1171,7 +1169,12 @@ impl<B: Backend> HeartmulaModel<B> {
             .reshape([batch, seq_len, HEARTMULA_HIDDEN_SIZE])
     }
 
-    fn embed_audio_token(&self, device: &B::Device, codebook: usize, token: i64) -> Tensor<B, 3> {
+    fn embed_audio_token(
+        &self,
+        device: &burn::tensor::Device,
+        codebook: usize,
+        token: i64,
+    ) -> Tensor<3> {
         let offset_token = token + (codebook * self.audio_vocab_size()) as i64;
         self.audio_embeddings
             .embed_offset_token(device, offset_token)
@@ -1183,14 +1186,14 @@ impl<B: Backend> HeartmulaModel<B> {
 
     fn embed_single_history_row(
         &self,
-        device: &B::Device,
+        device: &burn::tensor::Device,
         row: &[i64; HEARTMULA_PARALLEL_TOKENS],
-    ) -> Tensor<B, 3> {
-        let tokens = Tensor::<B, 3, Int>::from_data(
+    ) -> Tensor<3> {
+        let tokens = Tensor::<3, Int>::from_data(
             TensorData::new(row.to_vec(), [1, 1, HEARTMULA_PARALLEL_TOKENS]),
             device,
         );
-        let mask = Tensor::<B, 3, Bool>::from_data(
+        let mask = Tensor::<3, Bool>::from_data(
             TensorData::new(
                 vec![true, true, true, true, true, true, true, true, false],
                 [1, 1, HEARTMULA_PARALLEL_TOKENS],
@@ -1201,13 +1204,13 @@ impl<B: Backend> HeartmulaModel<B> {
     }
 }
 
-fn sync_and_cleanup_backend<B: Backend>(device: &B::Device) -> Result<()> {
-    B::sync(device)?;
-    B::memory_cleanup(device);
+fn sync_and_cleanup_backend(device: &burn::tensor::Device) -> Result<()> {
+    device.sync()?;
+    device.memory_cleanup();
     Ok(())
 }
 
-impl<B: Backend> SplitAudioEmbeddings<B> {
+impl SplitAudioEmbeddings {
     fn new_placeholder(vocab_size: usize) -> Self {
         Self {
             table: None,
@@ -1215,8 +1218,12 @@ impl<B: Backend> SplitAudioEmbeddings<B> {
         }
     }
 
-    fn load_from_data(device: &B::Device, data: TensorData, vocab_size: usize) -> Result<Self> {
-        let shape = data.shape.clone();
+    fn load_from_data(
+        device: &burn::tensor::Device,
+        data: TensorData,
+        vocab_size: usize,
+    ) -> Result<Self> {
+        let shape = data.shape().to_vec();
         let expected_rows = vocab_size * HEARTMULA_AUDIO_CODEBOOKS;
         if shape.as_slice() != [expected_rows, HEARTMULA_HIDDEN_SIZE] {
             anyhow::bail!(
@@ -1227,12 +1234,12 @@ impl<B: Backend> SplitAudioEmbeddings<B> {
             );
         }
         Ok(Self {
-            table: Some(Tensor::<B, 2>::from_data(data, device)),
+            table: Some(Tensor::<2>::from_data(data, device)),
             vocab_size,
         })
     }
 
-    fn forward(&self, offset_audio_ids: Tensor<B, 3, Int>) -> Tensor<B, 4> {
+    fn forward(&self, offset_audio_ids: Tensor<3, Int>) -> Tensor<4> {
         let [batch, seq_len, codebooks] = offset_audio_ids.dims();
         debug_assert_eq!(codebooks, HEARTMULA_AUDIO_CODEBOOKS);
         let table = self
@@ -1246,9 +1253,9 @@ impl<B: Backend> SplitAudioEmbeddings<B> {
             .reshape([batch, seq_len, codebooks, HEARTMULA_HIDDEN_SIZE])
     }
 
-    fn embed_offset_token(&self, device: &B::Device, offset_token: i64) -> Tensor<B, 3> {
+    fn embed_offset_token(&self, device: &burn::tensor::Device, offset_token: i64) -> Tensor<3> {
         debug_assert!((offset_token as usize) < self.vocab_size * HEARTMULA_AUDIO_CODEBOOKS);
-        let ids = Tensor::<B, 1, Int>::from_data([offset_token], device);
+        let ids = Tensor::<1, Int>::from_data([offset_token], device);
         self.table
             .as_ref()
             .expect("audio embeddings must be loaded before use")
@@ -1258,38 +1265,45 @@ impl<B: Backend> SplitAudioEmbeddings<B> {
     }
 }
 
-impl<B: Backend> Module<B> for SplitAudioEmbeddings<B> {
-    type Record = EmptyRecord;
-
-    fn visit<V: ModuleVisitor<B>>(&self, _visitor: &mut V) {}
-
-    fn map<M: ModuleMapper<B>>(self, _mapper: &mut M) -> Self {
+impl Module for SplitAudioEmbeddings {
+    fn train(self) -> Self {
+        Self {
+            table: self.table.map(Module::train),
+            vocab_size: self.vocab_size,
+        }
+    }
+    fn materialize(self) -> Self {
         self
     }
 
-    fn load_record(self, _record: Self::Record) -> Self {
+    fn visit<V: ModuleVisitor>(&self, _visitor: &mut V) {}
+
+    fn map<M: ModuleMapper>(self, _mapper: &mut M) -> Self {
         self
     }
 
-    fn into_record(self) -> Self::Record {
-        EmptyRecord::new()
+    fn valid(&self) -> Self {
+        Self {
+            table: self.table.as_ref().map(Module::valid),
+            vocab_size: self.vocab_size,
+        }
     }
 
-    fn to_device(self, device: &B::Device) -> Self {
+    fn to_device(self, device: &burn::tensor::Device) -> Self {
         Self {
             table: self.table.map(|tensor| tensor.to_device(device)),
             vocab_size: self.vocab_size,
         }
     }
 
-    fn fork(self, device: &B::Device) -> Self {
+    fn fork(self, device: &burn::tensor::Device) -> Self {
         Self {
             table: self.table.map(|tensor| tensor.fork(device)),
             vocab_size: self.vocab_size,
         }
     }
 
-    fn collect_devices(&self, mut devices: Devices<B>) -> Devices<B> {
+    fn collect_devices(&self, mut devices: Devices) -> Devices {
         if let Some(tensor) = &self.table {
             let device = tensor.device();
             if !devices.contains(&device) {
@@ -1300,7 +1314,7 @@ impl<B: Backend> Module<B> for SplitAudioEmbeddings<B> {
     }
 }
 
-impl<B: Backend> ModuleDisplayDefault for SplitAudioEmbeddings<B> {
+impl ModuleDisplayDefault for SplitAudioEmbeddings {
     fn content(&self, content: Content) -> Option<Content> {
         content
             .add("table_loaded", &self.table.is_some())
@@ -1309,30 +1323,15 @@ impl<B: Backend> ModuleDisplayDefault for SplitAudioEmbeddings<B> {
     }
 }
 
-impl<B: Backend> ModuleDisplay for SplitAudioEmbeddings<B> {}
+impl ModuleDisplay for SplitAudioEmbeddings {}
 
-impl<B: AutodiffBackend> AutodiffModule<B> for SplitAudioEmbeddings<B> {
-    type InnerModule = SplitAudioEmbeddings<B::InnerBackend>;
-
-    fn valid(&self) -> Self::InnerModule {
-        SplitAudioEmbeddings {
-            table: self.table.as_ref().map(|tensor| tensor.valid()),
-            vocab_size: self.vocab_size,
-        }
-    }
-
-    fn from_inner(module: Self::InnerModule) -> Self {
-        SplitAudioEmbeddings {
-            table: module
-                .table
-                .map(|tensor| Tensor::<B, 2>::from_data(tensor.to_data(), &tensor.device())),
-            vocab_size: module.vocab_size,
-        }
-    }
-}
-
-impl<B: Backend> HeartmulaTransformer<B> {
-    fn new(device: &B::Device, layer_count: usize, num_heads: usize, num_kv_heads: usize) -> Self {
+impl HeartmulaTransformer {
+    fn new(
+        device: &burn::tensor::Device,
+        layer_count: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+    ) -> Self {
         let layers = (0..layer_count)
             .map(|_| HeartmulaTransformerLayer::new(device, num_heads, num_kv_heads))
             .collect();
@@ -1342,7 +1341,7 @@ impl<B: Backend> HeartmulaTransformer<B> {
         }
     }
 
-    fn new_cache(&self) -> HeartmulaTransformerCache<B> {
+    fn new_cache(&self) -> HeartmulaTransformerCache {
         HeartmulaTransformerCache {
             layers: (0..self.layers.len())
                 .map(|_| HeartmulaAttentionCache {
@@ -1355,10 +1354,10 @@ impl<B: Backend> HeartmulaTransformer<B> {
 
     fn forward_incremental(
         &self,
-        mut hidden: Tensor<B, 3>,
-        position: Tensor<B, 2, Int>,
-        cache: &mut HeartmulaTransformerCache<B>,
-    ) -> Result<Tensor<B, 2>> {
+        mut hidden: Tensor<3>,
+        position: Tensor<2, Int>,
+        cache: &mut HeartmulaTransformerCache,
+    ) -> Result<Tensor<2>> {
         for (layer, layer_cache) in self.layers.iter().zip(cache.layers.iter_mut()) {
             hidden = layer.forward_incremental(hidden, position.clone(), layer_cache)?;
         }
@@ -1367,10 +1366,10 @@ impl<B: Backend> HeartmulaTransformer<B> {
 
     fn forward_prefill(
         &self,
-        mut hidden: Tensor<B, 3>,
-        positions: Tensor<B, 2, Int>,
-        cache: &mut HeartmulaTransformerCache<B>,
-    ) -> Result<Tensor<B, 2>> {
+        mut hidden: Tensor<3>,
+        positions: Tensor<2, Int>,
+        cache: &mut HeartmulaTransformerCache,
+    ) -> Result<Tensor<2>> {
         for (layer, layer_cache) in self.layers.iter().zip(cache.layers.iter_mut()) {
             hidden = layer.forward_prefill(hidden, positions.clone(), layer_cache)?;
         }
@@ -1378,8 +1377,8 @@ impl<B: Backend> HeartmulaTransformer<B> {
     }
 }
 
-impl<B: Backend> HeartmulaTransformerLayer<B> {
-    fn new(device: &B::Device, num_heads: usize, num_kv_heads: usize) -> Self {
+impl HeartmulaTransformerLayer {
+    fn new(device: &burn::tensor::Device, num_heads: usize, num_kv_heads: usize) -> Self {
         Self {
             attn: HeartmulaAttention::new(device, num_heads, num_kv_heads),
             mlp: HeartmulaMlp::new(device),
@@ -1390,10 +1389,10 @@ impl<B: Backend> HeartmulaTransformerLayer<B> {
 
     fn forward_incremental(
         &self,
-        hidden: Tensor<B, 3>,
-        position: Tensor<B, 2, Int>,
-        cache: &mut HeartmulaAttentionCache<B>,
-    ) -> Result<Tensor<B, 3>> {
+        hidden: Tensor<3>,
+        position: Tensor<2, Int>,
+        cache: &mut HeartmulaAttentionCache,
+    ) -> Result<Tensor<3>> {
         let attn_hidden =
             self.attn
                 .forward_incremental(self.sa_norm.forward(hidden.clone()), position, cache)?;
@@ -1404,10 +1403,10 @@ impl<B: Backend> HeartmulaTransformerLayer<B> {
 
     fn forward_prefill(
         &self,
-        hidden: Tensor<B, 3>,
-        positions: Tensor<B, 2, Int>,
-        cache: &mut HeartmulaAttentionCache<B>,
-    ) -> Result<Tensor<B, 3>> {
+        hidden: Tensor<3>,
+        positions: Tensor<2, Int>,
+        cache: &mut HeartmulaAttentionCache,
+    ) -> Result<Tensor<3>> {
         let attn_hidden =
             self.attn
                 .forward_prefill(self.sa_norm.forward(hidden.clone()), positions, cache)?;
@@ -1417,8 +1416,8 @@ impl<B: Backend> HeartmulaTransformerLayer<B> {
     }
 }
 
-impl<B: Backend> HeartmulaAttention<B> {
-    fn new(device: &B::Device, num_heads: usize, num_kv_heads: usize) -> Self {
+impl HeartmulaAttention {
+    fn new(device: &burn::tensor::Device, num_heads: usize, num_kv_heads: usize) -> Self {
         let head_dim = HEARTMULA_HIDDEN_SIZE / num_heads;
         Self {
             q_proj: linear_no_bias(device, HEARTMULA_HIDDEN_SIZE, num_heads * head_dim),
@@ -1435,10 +1434,10 @@ impl<B: Backend> HeartmulaAttention<B> {
 
     fn forward_incremental(
         &self,
-        hidden: Tensor<B, 3>,
-        position: Tensor<B, 2, Int>,
-        cache: &mut HeartmulaAttentionCache<B>,
-    ) -> Result<Tensor<B, 3>> {
+        hidden: Tensor<3>,
+        position: Tensor<2, Int>,
+        cache: &mut HeartmulaAttentionCache,
+    ) -> Result<Tensor<3>> {
         let [batch, seq_len, _] = hidden.dims();
         let q = self.q_proj.forward(hidden.clone()).reshape([
             batch,
@@ -1501,10 +1500,10 @@ impl<B: Backend> HeartmulaAttention<B> {
 
     fn forward_prefill(
         &self,
-        hidden: Tensor<B, 3>,
-        positions: Tensor<B, 2, Int>,
-        cache: &mut HeartmulaAttentionCache<B>,
-    ) -> Result<Tensor<B, 3>> {
+        hidden: Tensor<3>,
+        positions: Tensor<2, Int>,
+        cache: &mut HeartmulaAttentionCache,
+    ) -> Result<Tensor<3>> {
         let [batch, seq_len, _] = hidden.dims();
         let q = self.q_proj.forward(hidden.clone()).reshape([
             batch,
@@ -1544,7 +1543,7 @@ impl<B: Backend> HeartmulaAttention<B> {
         let scores = q
             .matmul(k_for_attn.clone().swap_dims(2, 3))
             .mul_scalar(1.0 / (self.meta.head_dim as f32).sqrt());
-        let mask = causal_mask::<B>(seq_len, &scores.device());
+        let mask = causal_mask(seq_len, &scores.device());
         let weights = softmax(scores.mask_fill(mask, -1.0e9), 3);
         let attended = weights.matmul(v_for_attn).swap_dims(1, 2).reshape([
             batch,
@@ -1555,8 +1554,8 @@ impl<B: Backend> HeartmulaAttention<B> {
     }
 }
 
-impl<B: Backend> HeartmulaMlp<B> {
-    fn new(device: &B::Device) -> Self {
+impl HeartmulaMlp {
+    fn new(device: &burn::tensor::Device) -> Self {
         Self {
             w1: linear_no_bias(device, HEARTMULA_HIDDEN_SIZE, HEARTMULA_MLP_DIM),
             w2: linear_no_bias(device, HEARTMULA_MLP_DIM, HEARTMULA_HIDDEN_SIZE),
@@ -1564,22 +1563,22 @@ impl<B: Backend> HeartmulaMlp<B> {
         }
     }
 
-    fn forward(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+    fn forward(&self, hidden: Tensor<3>) -> Tensor<3> {
         let gate = silu(self.w1.forward(hidden.clone()));
         let up = self.w3.forward(hidden);
         self.w2.forward(gate * up)
     }
 }
 
-impl<B: Backend> HeartmulaRmsNorm<B> {
-    fn new(device: &B::Device, hidden_size: usize, epsilon: f64) -> Self {
+impl HeartmulaRmsNorm {
+    fn new(device: &burn::tensor::Device, hidden_size: usize, epsilon: f64) -> Self {
         Self {
-            scale: Param::from_tensor(Tensor::<B, 1>::ones([hidden_size], device)),
+            scale: Param::from_tensor(Tensor::<1>::ones([hidden_size], device)),
             epsilon,
         }
     }
 
-    fn forward<const D: usize>(&self, hidden: Tensor<B, D>) -> Tensor<B, D> {
+    fn forward<const D: usize>(&self, hidden: Tensor<D>) -> Tensor<D> {
         let dtype = hidden.dtype();
         let rms = (hidden.clone().cast(DType::F32).square().mean_dim(D - 1) + self.epsilon).sqrt();
         (hidden / rms.cast(dtype)) * self.scale.val().unsqueeze()
@@ -1631,14 +1630,14 @@ pub fn write_frames_json(path: &Path, lyrics: &str, tags: &str, frames: &[Vec<i6
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn decode_frames_to_wav<B: burn::prelude::Backend>(
+pub fn decode_frames_to_wav(
     model_dir: &Path,
     _backend_arg: &str,
     float_size_arg: &str,
     frames_json: &Path,
     output_wav: &Path,
     duration_seconds: f32,
-    device: &B::Device,
+    device: &burn::tensor::Device,
     ode_steps: usize,
     decoder_seed: u64,
 ) -> Result<()> {
@@ -1646,21 +1645,21 @@ pub fn decode_frames_to_wav<B: burn::prelude::Backend>(
         env::var_os(HEARTCODEC_STAGE_ENV).and_then(|value| value.into_string().ok())
     {
         return match stage.as_str() {
-            HEARTCODEC_STAGE_FLOW => decode_frames_to_plan_rust::<B>(
+            HEARTCODEC_STAGE_FLOW => decode_frames_to_plan_rust(
                 model_dir,
                 frames_json,
                 device,
                 ode_steps,
                 &prepare_shared_decoder_initial_latent(frames_json, decoder_seed, output_wav)?,
             ),
-            HEARTCODEC_STAGE_SCALAR => decode_plan_to_wav_rust::<B>(model_dir, output_wav, device),
+            HEARTCODEC_STAGE_SCALAR => decode_plan_to_wav_rust(model_dir, output_wav, device),
             other => Err(anyhow!("unsupported HeartCodec stage '{other}'")),
         };
     }
 
     let _ = float_size_arg;
     let _ = duration_seconds;
-    decode_frames_to_wav_rust::<B>(
+    decode_frames_to_wav_rust(
         model_dir,
         frames_json,
         output_wav,
@@ -1675,20 +1674,20 @@ fn resolve_heartcodec_burnpack_path(model_dir: &Path) -> PathBuf {
     model_dir.join("heartcodec.bpk")
 }
 
-fn decode_frames_to_wav_rust<B: burn::prelude::Backend>(
+fn decode_frames_to_wav_rust(
     model_dir: &Path,
     frames_json: &Path,
     output_wav: &Path,
     duration_seconds: f32,
     decoder_seed: u64,
-    device: &B::Device,
+    device: &burn::tensor::Device,
     ode_steps: usize,
 ) -> Result<()> {
     let frames_text = std::fs::read_to_string(frames_json)
         .with_context(|| format!("failed to read {}", frames_json.display()))?;
     let _payload: HeartmulaJsonOutput = serde_json::from_str(&frames_text)
         .with_context(|| format!("failed to parse {}", frames_json.display()))?;
-    B::seed(device, 0);
+    device.seed(0);
     let initial_latent_json =
         prepare_shared_decoder_initial_latent(frames_json, decoder_seed, output_wav)?;
     let stage_plan_json = output_wav.with_extension("heartcodec-stage-plan.bin");
@@ -1697,18 +1696,18 @@ fn decode_frames_to_wav_rust<B: burn::prelude::Backend>(
         std::env::set_var(HEARTCODEC_STAGE_PLAN_JSON_ENV, &stage_plan_json);
     }
 
-    let plan_result = decode_frames_to_plan_rust::<B>(
+    let plan_result = decode_frames_to_plan_rust(
         model_dir,
         frames_json,
         device,
         ode_steps,
         &initial_latent_json,
     );
-    sync_and_cleanup_backend::<B>(device)?;
+    sync_and_cleanup_backend(device)?;
     plan_result?;
 
-    let decode_result = decode_plan_to_wav_rust::<B>(model_dir, output_wav, device);
-    sync_and_cleanup_backend::<B>(device)?;
+    let decode_result = decode_plan_to_wav_rust(model_dir, output_wav, device);
+    sync_and_cleanup_backend(device)?;
 
     let _ = std::fs::remove_file(&stage_plan_json);
     let _ = std::fs::remove_file(&initial_latent_json);
@@ -1718,10 +1717,10 @@ fn decode_frames_to_wav_rust<B: burn::prelude::Backend>(
     Ok(())
 }
 
-pub fn decode_frames_to_plan_rust<B: burn::prelude::Backend>(
+pub fn decode_frames_to_plan_rust(
     model_dir: &Path,
     frames_json: &Path,
-    device: &B::Device,
+    device: &burn::tensor::Device,
     ode_steps: usize,
     initial_latent_json: &Path,
 ) -> Result<()> {
@@ -1730,13 +1729,12 @@ pub fn decode_frames_to_plan_rust<B: burn::prelude::Backend>(
     let payload: HeartmulaJsonOutput = serde_json::from_str(&frames_text)
         .with_context(|| format!("failed to parse {}", frames_json.display()))?;
     let frames = payload.frames;
-    B::seed(device, 0);
-    let codes = frames_to_tensor::<B>(&frames, device);
+    device.seed(0);
+    let codes = frames_to_tensor(&frames, device);
     let codec_path = resolve_heartcodec_burnpack_path(model_dir);
-    let flow_matching =
-        crate::heartcodec::FlowMatching::<B>::load_from_burnpack(&codec_path, device)?;
-    let initial_latent = load_initial_latent_tensor::<B>(initial_latent_json, device)?;
-    let plan = crate::heartcodec::HeartCodecModel::<B>::build_scalar_decode_plan_impl(
+    let flow_matching = crate::heartcodec::FlowMatching::load_from_burnpack(&codec_path, device)?;
+    let initial_latent = load_initial_latent_tensor(initial_latent_json, device)?;
+    let plan = crate::heartcodec::HeartCodecModel::build_scalar_decode_plan_impl(
         &flow_matching,
         1.25,
         ode_steps,
@@ -1748,26 +1746,22 @@ pub fn decode_frames_to_plan_rust<B: burn::prelude::Backend>(
     Ok(())
 }
 
-pub fn decode_plan_to_wav_rust<B: burn::prelude::Backend>(
+pub fn decode_plan_to_wav_rust(
     model_dir: &Path,
     output_wav: &Path,
-    device: &B::Device,
+    device: &burn::tensor::Device,
 ) -> Result<()> {
     let stage_plan_json = current_codec_stage_plan_json()?;
-    let plan = load_codec_stage_plan::<B>(&stage_plan_json, device)?;
+    let plan = load_codec_stage_plan(&stage_plan_json, device)?;
     let codec_path = resolve_heartcodec_burnpack_path(model_dir);
-    let scalar_model = crate::heartcodec::ScalarModel::<B>::from_burnpack(&codec_path, device)?;
-    let wav = crate::heartcodec::HeartCodecModel::<B>::decode_scalar_plan_impl(&scalar_model, plan);
+    let scalar_model = crate::heartcodec::ScalarModel::from_burnpack(&codec_path, device)?;
+    let wav = crate::heartcodec::HeartCodecModel::decode_scalar_plan_impl(&scalar_model, plan);
     write_decoder_wav(output_wav, wav, 0.0)
 }
 
-fn write_decoder_wav<B: burn::prelude::Backend>(
-    output_wav: &Path,
-    wav: Tensor<B, 3>,
-    _duration_seconds: f32,
-) -> Result<()> {
+fn write_decoder_wav(output_wav: &Path, wav: Tensor<3>, _duration_seconds: f32) -> Result<()> {
     let dims = wav.dims();
-    let samples: Vec<f32> = wav.cast(DType::F32).to_data().to_vec::<f32>()?;
+    let samples: Vec<f32> = wav.cast(DType::F32).to_data().try_to_vec::<f32>()?;
     match dims.as_slice() {
         [channels, 1, frames] if *channels > 1 => {
             crate::heartcodec::write_wav_from_f32_interleaved(
@@ -1794,10 +1788,7 @@ fn current_codec_stage_plan_json() -> Result<PathBuf> {
         })
 }
 
-fn save_codec_stage_plan<B: burn::prelude::Backend>(
-    path: &Path,
-    plan: crate::heartcodec::ScalarDecodePlan<B>,
-) -> Result<()> {
+fn save_codec_stage_plan(path: &Path, plan: crate::heartcodec::ScalarDecodePlan) -> Result<()> {
     let file =
         File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     let mut writer = BufWriter::new(file);
@@ -1809,7 +1800,7 @@ fn save_codec_stage_plan<B: burn::prelude::Backend>(
     write_u64(&mut writer, plan.windows.len())?;
     for window in plan.windows {
         let dims = window.dims();
-        let data = window.cast(DType::F32).to_data().to_vec::<f32>()?;
+        let data = window.cast(DType::F32).to_data().try_to_vec::<f32>()?;
         write_dims(&mut writer, dims)?;
         write_f32_slice(&mut writer, &data)?;
     }
@@ -1818,10 +1809,10 @@ fn save_codec_stage_plan<B: burn::prelude::Backend>(
         .with_context(|| format!("failed to flush {}", path.display()))
 }
 
-fn load_codec_stage_plan<B: burn::prelude::Backend>(
+fn load_codec_stage_plan(
     path: &Path,
-    device: &B::Device,
-) -> Result<crate::heartcodec::ScalarDecodePlan<B>> {
+    device: &burn::tensor::Device,
+) -> Result<crate::heartcodec::ScalarDecodePlan> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mut reader = BufReader::new(file);
     let mut magic = [0_u8; HEARTCODEC_STAGE_PLAN_MAGIC.len()];
@@ -1838,10 +1829,7 @@ fn load_codec_stage_plan<B: burn::prelude::Backend>(
     for _ in 0..window_count {
         let dims = read_dims(&mut reader)?;
         let data = read_f32_vec(&mut reader)?;
-        windows.push(Tensor::<B, 3>::from_data(
-            TensorData::new(data, dims),
-            device,
-        ));
+        windows.push(Tensor::<3>::from_data(TensorData::new(data, dims), device));
     }
     Ok(crate::heartcodec::ScalarDecodePlan {
         target_len,
@@ -1929,15 +1917,12 @@ fn prepare_shared_decoder_initial_latent(
     Ok(path)
 }
 
-fn load_initial_latent_tensor<B: burn::prelude::Backend>(
-    path: &Path,
-    device: &B::Device,
-) -> Result<Tensor<B, 3>> {
+fn load_initial_latent_tensor(path: &Path, device: &burn::tensor::Device) -> Result<Tensor<3>> {
     let text =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let payload: LatentTensorFile = serde_json::from_str(&text)
         .with_context(|| format!("failed to parse {}", path.display()))?;
-    Ok(Tensor::<B, 3>::from_data(
+    Ok(Tensor::<3>::from_data(
         TensorData::new(payload.data, payload.dims),
         device,
     ))
@@ -2022,11 +2007,7 @@ fn build_audio_history_row(frame: &[i64], empty_id: i64) -> [i64; HEARTMULA_PARA
     row
 }
 
-fn splice_sequence_token<B: Backend>(
-    hidden: Tensor<B, 3>,
-    replacement: Tensor<B, 3>,
-    index: usize,
-) -> Tensor<B, 3> {
+fn splice_sequence_token(hidden: Tensor<3>, replacement: Tensor<3>, index: usize) -> Tensor<3> {
     let [batch, seq_len, dim] = hidden.dims();
     debug_assert_eq!(replacement.dims(), [batch, 1, dim]);
     let mut parts = Vec::new();
@@ -2040,24 +2021,24 @@ fn splice_sequence_token<B: Backend>(
     Tensor::cat(parts, 1)
 }
 
-fn history_tokens_tensor<B: Backend>(
+fn history_tokens_tensor(
     history: &[[i64; HEARTMULA_PARALLEL_TOKENS]],
-    device: &B::Device,
-) -> Tensor<B, 3, Int> {
+    device: &burn::tensor::Device,
+) -> Tensor<3, Int> {
     let flattened = history
         .iter()
         .flat_map(|row| row.iter().copied())
         .collect::<Vec<_>>();
-    Tensor::<B, 3, Int>::from_data(
+    Tensor::<3, Int>::from_data(
         TensorData::new(flattened, [1, history.len(), HEARTMULA_PARALLEL_TOKENS]),
         device,
     )
 }
 
-fn history_mask_tensor<B: Backend>(
+fn history_mask_tensor(
     history: &[[i64; HEARTMULA_PARALLEL_TOKENS]],
-    device: &B::Device,
-) -> Tensor<B, 3, Bool> {
+    device: &burn::tensor::Device,
+) -> Tensor<3, Bool> {
     let flattened = history
         .iter()
         .flat_map(|row| {
@@ -2075,22 +2056,22 @@ fn history_mask_tensor<B: Backend>(
             })
         })
         .collect::<Vec<_>>();
-    Tensor::<B, 3, Bool>::from_data(
+    Tensor::<3, Bool>::from_data(
         TensorData::new(flattened, [1, history.len(), HEARTMULA_PARALLEL_TOKENS]),
         device,
     )
 }
 
-fn single_position_tensor<B: Backend>(position: i64, device: &B::Device) -> Tensor<B, 2, Int> {
-    Tensor::<B, 2, Int>::from_data([[position]], device)
+fn single_position_tensor(position: i64, device: &burn::tensor::Device) -> Tensor<2, Int> {
+    Tensor::<2, Int>::from_data([[position]], device)
 }
 
-fn position_tensor<B: Backend>(positions: Vec<i64>, device: &B::Device) -> Tensor<B, 2, Int> {
+fn position_tensor(positions: Vec<i64>, device: &burn::tensor::Device) -> Tensor<2, Int> {
     let len = positions.len();
-    Tensor::<B, 1, Int>::from_data(TensorData::new(positions, [len]), device).reshape([1, len])
+    Tensor::<1, Int>::from_data(TensorData::new(positions, [len]), device).reshape([1, len])
 }
 
-fn repeat_kv_heads<B: Backend>(tensor: Tensor<B, 4>, repeats: usize) -> Tensor<B, 4> {
+fn repeat_kv_heads(tensor: Tensor<4>, repeats: usize) -> Tensor<4> {
     let [batch, seq_len, heads, head_dim] = tensor.dims();
     tensor
         .unsqueeze_dim::<5>(3)
@@ -2098,7 +2079,7 @@ fn repeat_kv_heads<B: Backend>(tensor: Tensor<B, 4>, repeats: usize) -> Tensor<B
         .reshape([batch, seq_len, heads * repeats, head_dim])
 }
 
-fn repeat_cached_kv_heads<B: Backend>(tensor: Tensor<B, 4>, repeats: usize) -> Tensor<B, 4> {
+fn repeat_cached_kv_heads(tensor: Tensor<4>, repeats: usize) -> Tensor<4> {
     let [batch, heads, seq_len, head_dim] = tensor.dims();
     tensor
         .unsqueeze_dim::<5>(2)
@@ -2106,17 +2087,15 @@ fn repeat_cached_kv_heads<B: Backend>(tensor: Tensor<B, 4>, repeats: usize) -> T
         .reshape([batch, heads * repeats, seq_len, head_dim])
 }
 
-fn apply_scaled_rope<B: Backend>(
-    tensor: Tensor<B, 4>,
-    positions: &Tensor<B, 2, Int>,
-) -> Tensor<B, 4> {
+fn apply_scaled_rope(tensor: Tensor<4>, positions: &Tensor<2, Int>) -> Tensor<4> {
     let [batch, seq_len, num_heads, head_dim] = tensor.dims();
     let pos = positions
         .clone()
         .to_data()
-        .to_vec::<i64>()
+        .convert::<i64>()
+        .try_to_vec::<i64>()
         .expect("positions should be materializable");
-    let cache = scaled_rope_cache::<B>(&tensor.device(), &pos, head_dim)
+    let cache = scaled_rope_cache(&tensor.device(), &pos, head_dim)
         .reshape([1, seq_len, 1, head_dim / 2, 2])
         .repeat_dim(0, batch);
     let reshaped = tensor.reshape([batch, seq_len, num_heads, head_dim / 2, 2]);
@@ -2151,11 +2130,11 @@ fn apply_scaled_rope<B: Backend>(
     .reshape([batch, seq_len, num_heads, head_dim])
 }
 
-fn scaled_rope_cache<B: Backend>(
-    device: &B::Device,
+fn scaled_rope_cache(
+    device: &burn::tensor::Device,
     positions: &[i64],
     head_dim: usize,
-) -> Tensor<B, 3> {
+) -> Tensor<3> {
     let theta = scaled_theta(head_dim);
     let mut values = Vec::with_capacity(positions.len() * (head_dim / 2) * 2);
     for &pos in positions {
@@ -2165,7 +2144,7 @@ fn scaled_rope_cache<B: Backend>(
             values.push(angle.sin());
         }
     }
-    Tensor::<B, 3>::from_data(
+    Tensor::<3>::from_data(
         TensorData::new(values, [positions.len(), head_dim / 2, 2]),
         device,
     )
@@ -2193,32 +2172,32 @@ fn scaled_theta(head_dim: usize) -> Vec<f32> {
         .collect()
 }
 
-fn causal_mask<B: Backend>(seq_len: usize, device: &B::Device) -> Tensor<B, 4, Bool> {
+fn causal_mask(seq_len: usize, device: &burn::tensor::Device) -> Tensor<4, Bool> {
     let mut mask = Vec::with_capacity(seq_len * seq_len);
     for row in 0..seq_len {
         for col in 0..seq_len {
             mask.push(col > row);
         }
     }
-    Tensor::<B, 4, Bool>::from_data(TensorData::new(mask, [1, 1, seq_len, seq_len]), device)
+    Tensor::<4, Bool>::from_data(TensorData::new(mask, [1, 1, seq_len, seq_len]), device)
 }
 
-fn take_last_token<B: Backend>(hidden: Tensor<B, 3>) -> Tensor<B, 2> {
+fn take_last_token(hidden: Tensor<3>) -> Tensor<2> {
     let [batch, seq_len, hidden_size] = hidden.dims();
     hidden
         .slice([0..batch, seq_len - 1..seq_len, 0..hidden_size])
         .reshape([batch, hidden_size])
 }
 
-fn tensor_to_f32_vec<B: Backend, const D: usize>(tensor: Tensor<B, D>) -> Result<Vec<f32>> {
+fn tensor_to_f32_vec<const D: usize>(tensor: Tensor<D>) -> Result<Vec<f32>> {
     tensor
         .cast(DType::F32)
         .to_data()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .map_err(|e| anyhow!("failed to materialize tensor as f32: {:?}", e))
 }
 
-fn sample_token<B: Backend>(logits: &Tensor<B, 2>, temperature: f32, topk: usize) -> Result<i64> {
+fn sample_token(logits: &Tensor<2>, temperature: f32, topk: usize) -> Result<i64> {
     use burn::tensor::Distribution;
     use burn::tensor::activation::softmax;
 
@@ -2235,15 +2214,15 @@ fn sample_token<B: Backend>(logits: &Tensor<B, 2>, temperature: f32, topk: usize
 
     let probs = softmax(topk_values, 1);
 
-    let uniform = Tensor::<B, 2>::random([1, k], Distribution::Uniform(0.0, 1.0), &probs.device())
+    let uniform = Tensor::<2>::random([1, k], Distribution::Uniform(0.0, 1.0), &probs.device())
         .cast(burn::tensor::DType::F32);
     let uniform_data = uniform.to_data();
     let uniform_vec: Vec<f32> = uniform_data
-        .to_vec()
+        .try_to_vec()
         .map_err(|e| anyhow!("failed to get uniform random data: {:?}", e))?;
     let probs_data = probs.cast(burn::tensor::DType::F32).to_data();
     let probs_vec: Vec<f32> = probs_data
-        .to_vec()
+        .try_to_vec()
         .map_err(|e| anyhow!("failed to get probability data: {:?}", e))?;
 
     let mut selected_idx = 0usize;
@@ -2262,17 +2241,17 @@ fn sample_token<B: Backend>(logits: &Tensor<B, 2>, temperature: f32, topk: usize
         .slice([0..1, selected_idx..selected_idx + 1])
         .to_data();
     let token_vec: Vec<i64> = token_data
-        .to_vec()
+        .try_to_vec()
         .map_err(|_| anyhow!("failed to get token"))?;
     let token = token_vec[0];
 
     Ok(token)
 }
 
-fn argmax_token<B: Backend>(logits: &Tensor<B, 2>) -> Result<i64> {
+fn argmax_token(logits: &Tensor<2>) -> Result<i64> {
     let logits_data = logits.clone().cast(DType::F32).to_data();
     let logits_vec: Vec<f32> = logits_data
-        .to_vec()
+        .try_to_vec()
         .map_err(|e| anyhow!("failed to get logits for argmax: {:?}", e))?;
     let dims = logits.dims();
     let vocab_size = *dims
@@ -2293,26 +2272,26 @@ fn argmax_token<B: Backend>(logits: &Tensor<B, 2>) -> Result<i64> {
     Ok(best_index as i64)
 }
 
-fn linear_no_bias<B: Backend>(device: &B::Device, d_input: usize, d_output: usize) -> Linear<B> {
+fn linear_no_bias(device: &burn::tensor::Device, d_input: usize, d_output: usize) -> Linear {
     LinearConfig::new(d_input, d_output)
         .with_bias(false)
         .with_layout(LinearLayout::Col)
         .init(device)
 }
 
-fn linear_with_bias<B: Backend>(device: &B::Device, d_input: usize, d_output: usize) -> Linear<B> {
+fn linear_with_bias(device: &burn::tensor::Device, d_input: usize, d_output: usize) -> Linear {
     LinearConfig::new(d_input, d_output)
         .with_layout(LinearLayout::Col)
         .init(device)
 }
 
-fn uninitialized_param<B: Backend, const D: usize>(
+fn uninitialized_param<const D: usize>(
     shape: [usize; D],
-    device: &B::Device,
-) -> Param<Tensor<B, D>> {
+    device: &burn::tensor::Device,
+) -> Param<Tensor<D>> {
     Param::uninitialized(
         ParamId::new(),
-        move |device, _require_grad| Tensor::<B, D>::zeros(shape, device),
+        move |device, _require_grad| Tensor::<D>::zeros(shape, device),
         device.clone(),
         false,
         shape.into(),
@@ -2436,38 +2415,37 @@ mod tests {
 
     #[test]
     fn single_position_tensor() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let tensor = super::single_position_tensor::<NdArray<f32>>(42, &device);
+        let device = burn::tensor::Device::flex();
+        let tensor = super::single_position_tensor(42, &device);
 
         assert_eq!(tensor.dims(), [1, 1]);
-        let data = tensor.to_data().to_vec::<i64>().unwrap();
+        let data = tensor
+            .to_data()
+            .convert::<i64>()
+            .try_to_vec::<i64>()
+            .unwrap();
         assert_eq!(data[0], 42);
     }
 
     #[test]
     fn position_tensor() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
+        let device = burn::tensor::Device::flex();
         let positions = vec![0, 1, 2, 3, 4];
-        let tensor = super::position_tensor::<NdArray<f32>>(positions, &device);
+        let tensor = super::position_tensor(positions, &device);
 
         assert_eq!(tensor.dims(), [1, 5]);
-        let data = tensor.to_data().to_vec::<i64>().unwrap();
+        let data = tensor
+            .to_data()
+            .convert::<i64>()
+            .try_to_vec::<i64>()
+            .unwrap();
         assert_eq!(data, vec![0, 1, 2, 3, 4]);
     }
 
     #[test]
     fn repeat_kv_heads() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let tensor = Tensor::<NdArray<f32>, 4>::from_data(
-            TensorData::new(vec![1.0; 32], [1, 2, 4, 4]),
-            &device,
-        );
+        let device = burn::tensor::Device::flex();
+        let tensor = Tensor::<4>::from_data(TensorData::new(vec![1.0; 32], [1, 2, 4, 4]), &device);
 
         let repeated = super::repeat_kv_heads(tensor, 2);
         assert_eq!(repeated.dims(), [1, 2, 8, 4]);
@@ -2475,13 +2453,8 @@ mod tests {
 
     #[test]
     fn repeat_cached_kv_heads() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let tensor = Tensor::<NdArray<f32>, 4>::from_data(
-            TensorData::new(vec![1.0; 32], [1, 4, 2, 4]),
-            &device,
-        );
+        let device = burn::tensor::Device::flex();
+        let tensor = Tensor::<4>::from_data(TensorData::new(vec![1.0; 32], [1, 4, 2, 4]), &device);
 
         let repeated = super::repeat_cached_kv_heads(tensor, 3);
         assert_eq!(repeated.dims(), [1, 12, 2, 4]);
@@ -2489,10 +2462,8 @@ mod tests {
 
     #[test]
     fn take_last_token() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let tensor = Tensor::<NdArray<f32>, 3>::from_data(
+        let device = burn::tensor::Device::flex();
+        let tensor = Tensor::<3>::from_data(
             TensorData::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [1, 3, 2]),
             &device,
         );
@@ -2503,13 +2474,9 @@ mod tests {
 
     #[test]
     fn tensor_to_f32_vec_success() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let tensor = Tensor::<NdArray<f32>, 2>::from_data(
-            TensorData::new(vec![1.0, 2.0, 3.0, 4.0], [2, 2]),
-            &device,
-        );
+        let device = burn::tensor::Device::flex();
+        let tensor =
+            Tensor::<2>::from_data(TensorData::new(vec![1.0, 2.0, 3.0, 4.0], [2, 2]), &device);
 
         let vec = super::tensor_to_f32_vec(tensor).unwrap();
         assert_eq!(vec, vec![1.0, 2.0, 3.0, 4.0]);
@@ -2624,12 +2591,10 @@ mod tests {
 
     #[test]
     fn heartmula_rms_norm_forward() {
-        use burn::backend::ndarray::NdArray;
+        let device = burn::tensor::Device::flex();
+        let norm = super::HeartmulaRmsNorm::new(&device, 64, 1e-5);
 
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let norm = super::HeartmulaRmsNorm::<NdArray<f32>>::new(&device, 64, 1e-5);
-
-        let input = Tensor::<NdArray<f32>, 3>::ones([1, 4, 64], &device);
+        let input = Tensor::<3>::ones([1, 4, 64], &device);
         let output = norm.forward(input);
 
         assert_eq!(output.dims(), [1, 4, 64]);
@@ -2637,12 +2602,10 @@ mod tests {
 
     #[test]
     fn heartmula_mlp_forward() {
-        use burn::backend::ndarray::NdArray;
+        let device = burn::tensor::Device::flex();
+        let mlp = super::HeartmulaMlp::new(&device);
 
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let mlp = super::HeartmulaMlp::<NdArray<f32>>::new(&device);
-
-        let input = Tensor::<NdArray<f32>, 3>::ones([1, 4, HEARTMULA_HIDDEN_SIZE], &device);
+        let input = Tensor::<3>::ones([1, 4, HEARTMULA_HIDDEN_SIZE], &device);
         let output = mlp.forward(input);
 
         assert_eq!(output.dims(), [1, 4, HEARTMULA_HIDDEN_SIZE]);
@@ -2650,10 +2613,8 @@ mod tests {
 
     #[test]
     fn heartmula_attention_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let attn = super::HeartmulaAttention::<NdArray<f32>>::new(
+        let device = burn::tensor::Device::flex();
+        let attn = super::HeartmulaAttention::new(
             &device,
             HEARTMULA_BACKBONE_HEADS,
             HEARTMULA_BACKBONE_KV_HEADS,
@@ -2665,10 +2626,8 @@ mod tests {
 
     #[test]
     fn heartmula_transformer_layer_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let layer = super::HeartmulaTransformerLayer::<NdArray<f32>>::new(
+        let device = burn::tensor::Device::flex();
+        let layer = super::HeartmulaTransformerLayer::new(
             &device,
             HEARTMULA_BACKBONE_HEADS,
             HEARTMULA_BACKBONE_KV_HEADS,
@@ -2679,10 +2638,8 @@ mod tests {
 
     #[test]
     fn heartmula_transformer_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let transformer = super::HeartmulaTransformer::<NdArray<f32>>::new(
+        let device = burn::tensor::Device::flex();
+        let transformer = super::HeartmulaTransformer::new(
             &device,
             HEARTMULA_BACKBONE_LAYERS,
             HEARTMULA_BACKBONE_HEADS,
@@ -2694,10 +2651,8 @@ mod tests {
 
     #[test]
     fn heartmula_model_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let model = super::HeartmulaModel::<NdArray<f32>>::new(&device, 1000, 1024);
+        let device = burn::tensor::Device::flex();
+        let model = super::HeartmulaModel::new(&device, 1000, 1024);
 
         assert_eq!(model.audio_head.dims()[0], HEARTMULA_AUDIO_CODEBOOKS - 1);
         assert_eq!(model.audio_head.dims()[1], HEARTMULA_HIDDEN_SIZE);
@@ -2706,57 +2661,47 @@ mod tests {
 
     #[test]
     fn heartmula_model_audio_vocab_size() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let model = super::HeartmulaModel::<NdArray<f32>>::new(&device, 1000, 1024);
+        let device = burn::tensor::Device::flex();
+        let model = super::HeartmulaModel::new(&device, 1000, 1024);
 
         assert_eq!(model.audio_vocab_size(), 1024);
     }
 
     #[test]
     fn history_tokens_tensor_shape() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
+        let device = burn::tensor::Device::flex();
         let history: Vec<[i64; HEARTMULA_PARALLEL_TOKENS]> = vec![
             [1, 2, 3, 4, 5, 6, 7, 8, 100],
             [9, 10, 11, 12, 13, 14, 15, 16, 101],
         ];
 
-        let tensor = super::history_tokens_tensor::<NdArray<f32>>(&history, &device);
+        let tensor = super::history_tokens_tensor(&history, &device);
         assert_eq!(tensor.dims(), [1, 2, HEARTMULA_PARALLEL_TOKENS]);
     }
 
     #[test]
     fn history_mask_tensor_shape() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
+        let device = burn::tensor::Device::flex();
         let history: Vec<[i64; HEARTMULA_PARALLEL_TOKENS]> =
             vec![[1, 2, 3, 4, 5, 6, 7, 8, 100], [0, 0, 0, 0, 0, 0, 0, 0, 101]];
 
-        let tensor = super::history_mask_tensor::<NdArray<f32>>(&history, &device);
+        let tensor = super::history_mask_tensor(&history, &device);
         assert_eq!(tensor.dims(), [1, 2, HEARTMULA_PARALLEL_TOKENS]);
     }
 
     #[test]
     fn causal_mask_shape() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let mask = super::causal_mask::<NdArray<f32>>(5, &device);
+        let device = burn::tensor::Device::flex();
+        let mask = super::causal_mask(5, &device);
 
         assert_eq!(mask.dims(), [1, 1, 5, 5]);
     }
 
     #[test]
     fn causal_mask_values() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let mask = super::causal_mask::<NdArray<f32>>(3, &device);
-        let data = mask.to_data().to_vec::<bool>().unwrap();
+        let device = burn::tensor::Device::flex();
+        let mask = super::causal_mask(3, &device);
+        let data = mask.to_data().try_to_vec::<bool>().unwrap();
 
         assert!(!data[0]);
         assert!(data[1]);
@@ -2771,14 +2716,10 @@ mod tests {
 
     #[test]
     fn apply_scaled_rope_preserves_shape() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let tensor = Tensor::<NdArray<f32>, 4>::ones([1, 4, 8, 64], &device);
-        let positions = Tensor::<NdArray<f32>, 2, Int>::from_data(
-            TensorData::new(vec![0, 1, 2, 3], [1, 4]),
-            &device,
-        );
+        let device = burn::tensor::Device::flex();
+        let tensor = Tensor::<4>::ones([1, 4, 8, 64], &device);
+        let positions =
+            Tensor::<2, Int>::from_data(TensorData::new(vec![0, 1, 2, 3], [1, 4]), &device);
 
         let rotated = super::apply_scaled_rope(tensor, &positions);
         assert_eq!(rotated.dims(), [1, 4, 8, 64]);
@@ -2786,28 +2727,22 @@ mod tests {
 
     #[test]
     fn scaled_rope_cache_shape() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
+        let device = burn::tensor::Device::flex();
         let positions = vec![0, 1, 2, 3, 4];
-        let cache = super::scaled_rope_cache::<NdArray<f32>>(&device, &positions, 64);
+        let cache = super::scaled_rope_cache(&device, &positions, 64);
 
         assert_eq!(cache.dims(), [5, 32, 2]);
     }
 
     #[test]
     fn splice_sequence_token_middle() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let hidden = Tensor::<NdArray<f32>, 3>::from_data(
+        let device = burn::tensor::Device::flex();
+        let hidden = Tensor::<3>::from_data(
             TensorData::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [1, 3, 2]),
             &device,
         );
-        let replacement = Tensor::<NdArray<f32>, 3>::from_data(
-            TensorData::new(vec![9.0, 9.0], [1, 1, 2]),
-            &device,
-        );
+        let replacement =
+            Tensor::<3>::from_data(TensorData::new(vec![9.0, 9.0], [1, 1, 2]), &device);
 
         let result = super::splice_sequence_token(hidden, replacement, 1);
         assert_eq!(result.dims(), [1, 3, 2]);
@@ -2815,17 +2750,13 @@ mod tests {
 
     #[test]
     fn splice_sequence_token_at_start() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let hidden = Tensor::<NdArray<f32>, 3>::from_data(
+        let device = burn::tensor::Device::flex();
+        let hidden = Tensor::<3>::from_data(
             TensorData::new(vec![1.0, 2.0, 3.0, 4.0], [1, 2, 2]),
             &device,
         );
-        let replacement = Tensor::<NdArray<f32>, 3>::from_data(
-            TensorData::new(vec![9.0, 9.0], [1, 1, 2]),
-            &device,
-        );
+        let replacement =
+            Tensor::<3>::from_data(TensorData::new(vec![9.0, 9.0], [1, 1, 2]), &device);
 
         let result = super::splice_sequence_token(hidden, replacement, 0);
         assert_eq!(result.dims(), [1, 2, 2]);
@@ -2833,17 +2764,13 @@ mod tests {
 
     #[test]
     fn splice_sequence_token_at_end() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let hidden = Tensor::<NdArray<f32>, 3>::from_data(
+        let device = burn::tensor::Device::flex();
+        let hidden = Tensor::<3>::from_data(
             TensorData::new(vec![1.0, 2.0, 3.0, 4.0], [1, 2, 2]),
             &device,
         );
-        let replacement = Tensor::<NdArray<f32>, 3>::from_data(
-            TensorData::new(vec![9.0, 9.0], [1, 1, 2]),
-            &device,
-        );
+        let replacement =
+            Tensor::<3>::from_data(TensorData::new(vec![9.0, 9.0], [1, 1, 2]), &device);
 
         let result = super::splice_sequence_token(hidden, replacement, 1);
         assert_eq!(result.dims(), [1, 2, 2]);

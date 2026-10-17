@@ -241,9 +241,10 @@ Building on Windows requires MSVC and a few environment variables.
 
 ### Standalone usage note
 
-This crate is published as a standalone package, but it depends on pre-release
-versions of `burn` and related crates. Because pre-release semver ranges are
-fluid, a fresh `Cargo.lock` may resolve to newer, API-incompatible versions.
+This crate uses Burn 0.22 with runtime device selection: `flex` for CPU
+inference and wgpu for Vulkan. The local `../llama` dependency must be available
+when building this repository; publish `maolan-llama` 0.0.3 before publishing
+this version of `maolan-generate`.
 
 ## Repository
 

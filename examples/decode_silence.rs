@@ -8,23 +8,17 @@ use maolan_generate::acestep::pipeline::SilenceLatent;
 use maolan_generate::acestep::vae::{OobleckDecoder, OobleckVaeConfig};
 use std::path::Path;
 
-type B = burn::backend::NdArray<f32>;
-
 fn main() -> anyhow::Result<()> {
     let model_dir = std::env::args()
         .nth(1)
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("/home/meka/repos/ace"));
-    let device = Default::default();
+    let device = burn::tensor::Device::flex();
 
     let vae_config = OobleckVaeConfig::load(&model_dir.join("vae_config.json"))?;
-    let vae = OobleckDecoder::<B>::from_burnpack(
-        &vae_config,
-        &model_dir.join("acestep-vae.bpk"),
-        &device,
-    )?;
-    let silence =
-        SilenceLatent::<B>::from_burnpack(&model_dir.join("silence_latent.bpk"), &device)?;
+    let vae =
+        OobleckDecoder::from_burnpack(&vae_config, &model_dir.join("acestep-vae.bpk"), &device)?;
+    let silence = SilenceLatent::from_burnpack(&model_dir.join("silence_latent.bpk"), &device)?;
     let [_, frames, _] = silence.silence_latent.dims();
     println!("silence latent: {frames} frames");
 
@@ -34,7 +28,7 @@ fn main() -> anyhow::Result<()> {
     let values: Vec<f32> = audio
         .into_data()
         .convert::<f32>()
-        .to_vec()
+        .try_to_vec()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let peak = values.iter().fold(0.0_f32, |a, v| a.max(v.abs()));
     let rms = (values.iter().map(|v| v * v).sum::<f32>() / values.len() as f32).sqrt();
@@ -50,7 +44,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     // Also dump the latent stats so we can eyeball them.
-    let latents = SilenceLatent::<B>::from_burnpack(
+    let latents = SilenceLatent::from_burnpack(
         Path::new(&model_dir).join("silence_latent.bpk").as_path(),
         &device,
     )?
@@ -58,7 +52,7 @@ fn main() -> anyhow::Result<()> {
     let v: Vec<f32> = latents
         .into_data()
         .convert::<f32>()
-        .to_vec()
+        .try_to_vec()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let lpeak = v.iter().fold(0.0_f32, |a, v| a.max(v.abs()));
     let lrms = (v.iter().map(|v| v * v).sum::<f32>() / v.len() as f32).sqrt();

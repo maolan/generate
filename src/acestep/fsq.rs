@@ -20,7 +20,6 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use burn::module::Module;
 use burn::nn::{Linear, LinearConfig, LinearLayout};
-use burn::prelude::Backend;
 use burn::tensor::{Int, Tensor, TensorData};
 use burn_store::{BurnpackStore, ModuleSnapshot};
 
@@ -63,13 +62,13 @@ pub fn level_values(level_indices: &[u32; 6]) -> [f32; 6] {
 /// Only the decode direction (LM codes → continuous 2048-dim hints) is needed for
 /// text2music with LM codes; the encode direction is used by cover/extract flows.
 #[derive(Module, Debug)]
-pub struct ResidualFsq<B: Backend> {
-    pub project_in: Linear<B>,
-    pub project_out: Linear<B>,
+pub struct ResidualFsq {
+    pub project_in: Linear,
+    pub project_out: Linear,
 }
 
-impl<B: Backend> ResidualFsq<B> {
-    pub fn new(device: &B::Device) -> Self {
+impl ResidualFsq {
+    pub fn new(device: &burn::tensor::Device) -> Self {
         // LinearLayout::Col matches the checkpoint's PyTorch [out, in] weights.
         Self {
             project_in: LinearConfig::new(FSQ_HIDDEN_DIM, FSQ_CODE_DIM)
@@ -85,9 +84,9 @@ impl<B: Backend> ResidualFsq<B> {
 
     /// Load weights from a burnpack file whose keys match the canonical tensor names
     /// documented at the top of this module.
-    pub fn from_burnpack(path: &Path, device: &B::Device) -> Result<Self> {
+    pub fn from_burnpack(path: &Path, device: &burn::tensor::Device) -> Result<Self> {
         let mut model = Self::new(device);
-        let mut store = BurnpackStore::from_file(path).zero_copy(true);
+        let mut store = BurnpackStore::from_file(path);
         model
             .load_from(&mut store)
             .with_context(|| format!("failed to load FSQ weights from {}", path.display()))?;
@@ -99,13 +98,13 @@ impl<B: Backend> ResidualFsq<B> {
     /// `indices`: [B, T5] integer codes in 0..64000 → returns [B, T5, 2048]
     /// (`project_out(code)`). The mixed-radix decomposition runs on the host;
     /// this is called once per generation, so clarity beats cleverness.
-    pub fn decode_indices(&self, indices: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+    pub fn decode_indices(&self, indices: Tensor<2, Int>) -> Tensor<3> {
         let [batch, t5] = indices.dims();
         let device = indices.device();
         let raw = indices
             .to_data()
             .convert::<i64>()
-            .to_vec::<i64>()
+            .try_to_vec::<i64>()
             .expect("FSQ indices must be convertible to i64");
 
         let mut codes = Vec::with_capacity(batch * t5 * FSQ_CODE_DIM);
@@ -118,7 +117,7 @@ impl<B: Backend> ResidualFsq<B> {
         }
 
         let code_tensor =
-            Tensor::<B, 3>::from_data(TensorData::new(codes, [batch, t5, FSQ_CODE_DIM]), &device);
+            Tensor::<3>::from_data(TensorData::new(codes, [batch, t5, FSQ_CODE_DIM]), &device);
         self.project_out.forward(code_tensor)
     }
 }
@@ -126,7 +125,6 @@ impl<B: Backend> ResidualFsq<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::NdArray;
 
     #[test]
     fn index_zero_maps_to_all_zero_levels() {
@@ -177,16 +175,13 @@ mod tests {
 
     #[test]
     fn decode_indices_shape_and_finiteness() {
-        type B = NdArray<f32>;
-        let device = burn::prelude::Device::<B>::default();
-        let fsq = ResidualFsq::<B>::new(&device);
-        let indices = Tensor::<B, 2, Int>::from_data(
-            TensorData::new(vec![0i64, 12345, 63999], [1, 3]),
-            &device,
-        );
+        let device = burn::prelude::Device::flex();
+        let fsq = ResidualFsq::new(&device);
+        let indices =
+            Tensor::<2, Int>::from_data(TensorData::new(vec![0i64, 12345, 63999], [1, 3]), &device);
         let decoded = fsq.decode_indices(indices);
         assert_eq!(decoded.dims(), [1, 3, 2048]);
-        let values: Vec<f32> = decoded.to_data().to_vec::<f32>().unwrap();
+        let values: Vec<f32> = decoded.to_data().try_to_vec::<f32>().unwrap();
         assert!(values.iter().all(|v| v.is_finite()));
     }
 }

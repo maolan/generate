@@ -6,7 +6,6 @@ use burn::module::{Module, Param};
 use burn::nn::PaddingConfig1d;
 use burn::nn::conv::{Conv1d, Conv1dConfig};
 use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig, LinearLayout};
-use burn::prelude::Backend;
 use burn::tensor::{DType, Int, Tensor, TensorData};
 use burn_store::{BurnpackStore, ModuleSnapshot, ModuleStore};
 use oxideav_core::{
@@ -83,22 +82,22 @@ impl Default for HeartCodecConfig {
 }
 
 #[derive(Module, Debug)]
-pub struct HeartCodecModel<B: Backend> {
-    pub flow_matching: FlowMatching<B>,
-    pub scalar_model: ScalarModel<B>,
+pub struct HeartCodecModel {
+    pub flow_matching: FlowMatching,
+    pub scalar_model: ScalarModel,
     pub ode_steps: usize,
     pub guidance_scale: f32,
 }
 
 #[derive(Debug)]
-pub struct ScalarDecodePlan<B: Backend> {
+pub struct ScalarDecodePlan {
     pub target_len: usize,
     pub audio_target_len: usize,
-    pub windows: Vec<Tensor<B, 3>>,
+    pub windows: Vec<Tensor<3>>,
 }
 
-impl<B: Backend> HeartCodecModel<B> {
-    pub fn new(device: &B::Device) -> Self {
+impl HeartCodecModel {
+    pub fn new(device: &burn::tensor::Device) -> Self {
         let config = HeartCodecConfig::default();
         Self {
             flow_matching: FlowMatching::new(device, &config),
@@ -118,9 +117,9 @@ impl<B: Backend> HeartCodecModel<B> {
         self
     }
 
-    pub fn from_burnpack(path: &std::path::Path, device: &B::Device) -> Result<Self> {
+    pub fn from_burnpack(path: &std::path::Path, device: &burn::tensor::Device) -> Result<Self> {
         let mut model = Self::new(device);
-        let mut store = BurnpackStore::from_file(path).zero_copy(true);
+        let mut store = BurnpackStore::from_file(path);
 
         if let Err(_e) = model.load_from(&mut store) {
             model = Self::load_with_mapping(path, device)?;
@@ -130,11 +129,11 @@ impl<B: Backend> HeartCodecModel<B> {
     }
 
     fn load_flow_matching_manually<F>(
-        _flow_matching: &mut FlowMatching<B>,
+        _flow_matching: &mut FlowMatching,
         _path: &std::path::Path,
-        device: &B::Device,
+        device: &burn::tensor::Device,
         get_tensor: &F,
-    ) -> Result<FlowMatching<B>>
+    ) -> Result<FlowMatching>
     where
         F: Fn(&str) -> Option<(Vec<f32>, Vec<usize>)>,
     {
@@ -149,7 +148,7 @@ impl<B: Backend> HeartCodecModel<B> {
         )?;
         let zero_cond_embedding1 =
             if let Some((data, shape)) = get_tensor("flow_matching.zero_cond_embedding1") {
-                Tensor::<B, 1>::from_data(TensorData::new(data, [shape[0]]), device)
+                Tensor::<1>::from_data(TensorData::new(data, [shape[0]]), device)
             } else {
                 Tensor::zeros([config.dim], device)
             };
@@ -167,13 +166,12 @@ impl<B: Backend> HeartCodecModel<B> {
         })
     }
 
-    fn load_with_mapping(path: &std::path::Path, device: &B::Device) -> Result<Self> {
+    fn load_with_mapping(path: &std::path::Path, device: &burn::tensor::Device) -> Result<Self> {
         use burn::tensor::DType;
         use burn_store::ModuleStore;
 
         let snapshots = BurnpackStore::from_file(path)
-            .zero_copy(true)
-            .get_all_snapshots()
+            .get_all_tensors()
             .with_context(|| "failed to read burnpack snapshots")?
             .clone();
 
@@ -181,11 +179,11 @@ impl<B: Backend> HeartCodecModel<B> {
 
         let get_tensor = |name: &str| -> Option<(Vec<f32>, Vec<usize>)> {
             snapshots.iter().find_map(|(_, snap)| {
-                if snap.full_path() == name {
-                    let data = snap.to_data().ok()?;
-                    if data.dtype == DType::F32 {
-                        let shape = data.shape.to_vec();
-                        let values: Vec<f32> = data.to_vec::<f32>().ok()?;
+                if snap.name == name {
+                    let data = burn_store::bridge::to_data(snap).ok()?;
+                    if data.dtype() == DType::F32 {
+                        let shape = data.shape().to_vec();
+                        let values: Vec<f32> = data.try_to_vec::<f32>().ok()?;
                         Some((values, shape))
                     } else {
                         None
@@ -216,19 +214,18 @@ impl<B: Backend> HeartCodecModel<B> {
 
     fn snapshots_to_f32_lookup(path: &std::path::Path) -> Result<Box<TensorLookup>> {
         let snapshots = BurnpackStore::from_file(path)
-            .zero_copy(true)
-            .get_all_snapshots()
+            .get_all_tensors()
             .with_context(|| "failed to read burnpack snapshots")?
             .clone();
 
         Ok(Box::new(
             move |name: &str| -> Option<(Vec<f32>, Vec<usize>)> {
                 snapshots.iter().find_map(|(_, snap)| {
-                    if snap.full_path() == name {
-                        let data = snap.to_data().ok()?;
-                        if data.dtype == DType::F32 {
-                            let shape = data.shape.to_vec();
-                            let values: Vec<f32> = data.to_vec::<f32>().ok()?;
+                    if snap.name == name {
+                        let data = burn_store::bridge::to_data(snap).ok()?;
+                        if data.dtype() == DType::F32 {
+                            let shape = data.shape().to_vec();
+                            let values: Vec<f32> = data.try_to_vec::<f32>().ok()?;
                             Some((values, shape))
                         } else {
                             None
@@ -242,12 +239,12 @@ impl<B: Backend> HeartCodecModel<B> {
     }
 
     pub(crate) fn build_scalar_decode_plan_impl(
-        flow_matching: &FlowMatching<B>,
+        flow_matching: &FlowMatching,
         guidance_scale: f32,
         ode_steps: usize,
-        codes: Tensor<B, 3, Int>,
-        first_latent: Tensor<B, 3>,
-    ) -> ScalarDecodePlan<B> {
+        codes: Tensor<3, Int>,
+        first_latent: Tensor<3>,
+    ) -> ScalarDecodePlan {
         let device = codes.device();
         let [batch, num_quantizers, seq_len] = codes.dims();
         assert_eq!(batch, 1, "HeartCodec decode expects a single code batch");
@@ -291,7 +288,7 @@ impl<B: Backend> HeartCodecModel<B> {
         }
 
         let mut windows = Vec::new();
-        let mut previous_latent: Option<Tensor<B, 3>> = None;
+        let mut previous_latent: Option<Tensor<3>> = None;
         let mut sinx = 0usize;
         while sinx + min_samples <= codes_len {
             let window_end = (sinx + min_samples).min(codes_len);
@@ -334,7 +331,7 @@ impl<B: Backend> HeartCodecModel<B> {
                     Tensor::cat(
                         vec![
                             true_latent.clone(),
-                            Tensor::<B, 3>::random(
+                            Tensor::<3>::random(
                                 [batch, len_add_to_latent, true_latent.dims()[2]],
                                 burn::tensor::Distribution::Normal(0.0, 1.0),
                                 &device,
@@ -367,9 +364,9 @@ impl<B: Backend> HeartCodecModel<B> {
     }
 
     pub(crate) fn decode_scalar_plan_impl(
-        scalar_model: &ScalarModel<B>,
-        plan: ScalarDecodePlan<B>,
-    ) -> Tensor<B, 3> {
+        scalar_model: &ScalarModel,
+        plan: ScalarDecodePlan,
+    ) -> Tensor<3> {
         let device = plan
             .windows
             .first()
@@ -382,7 +379,7 @@ impl<B: Backend> HeartCodecModel<B> {
             .expect("expected at least one scalar decode window");
         let hop_samples = ((min_samples / HEARTCODEC_WINDOW_FRAMES) * 80).max(1);
         let ovlp_samples = min_samples.saturating_sub(hop_samples);
-        let mut output: Option<Tensor<B, 3>> = None;
+        let mut output: Option<Tensor<3>> = None;
 
         for scalar_input in plan.windows {
             let mut cur_output = scalar_model.decode_with_sync(scalar_input);
@@ -402,7 +399,7 @@ impl<B: Backend> HeartCodecModel<B> {
                             let denom = (ovlp_samples.saturating_sub(1)).max(1) as f32;
                             v.push(i as f32 / denom);
                         }
-                        Tensor::<B, 3>::from_data(TensorData::new(v, [1, 1, ovlp_samples]), &device)
+                        Tensor::<3>::from_data(TensorData::new(v, [1, 1, ovlp_samples]), &device)
                     };
                     let prev_dims = prev.dims();
                     let prev_len = prev_dims[2];
@@ -422,7 +419,7 @@ impl<B: Backend> HeartCodecModel<B> {
                     let transient_cur = cur_energy / energy_sum;
                     let cur_weight = (ov_win.clone() + transient_cur) * 0.5;
                     let prev_weight =
-                        Tensor::<B, 3>::ones([1, 1, ovlp_samples], &device) - cur_weight.clone();
+                        Tensor::<3>::ones([1, 1, ovlp_samples], &device) - cur_weight.clone();
                     let blended = prev_tail * prev_weight + cur_head * cur_weight;
                     output = Some(Tensor::cat(
                         vec![
@@ -445,15 +442,15 @@ impl<B: Backend> HeartCodecModel<B> {
 
     #[allow(clippy::too_many_arguments)]
     fn run_flow_matching_window(
-        flow_matching: &FlowMatching<B>,
+        flow_matching: &FlowMatching,
         guidance_scale: f32,
         ode_steps: usize,
-        codes: Tensor<B, 3, Int>,
-        true_latents: Tensor<B, 3>,
+        codes: Tensor<3, Int>,
+        true_latents: Tensor<3>,
         latent_length: usize,
         incontext_length: usize,
-        initial_latent_override: Option<Tensor<B, 3>>,
-    ) -> Tensor<B, 3> {
+        initial_latent_override: Option<Tensor<3>>,
+    ) -> Tensor<3> {
         flow_matching.inference_codes(
             vec![codes],
             true_latents,
@@ -467,7 +464,7 @@ impl<B: Backend> HeartCodecModel<B> {
         )
     }
 
-    fn latent_to_scalar_input(latent: Tensor<B, 3>) -> Tensor<B, 3> {
+    fn latent_to_scalar_input(latent: Tensor<3>) -> Tensor<3> {
         let [batch, seq_len, channels] = latent.dims();
         assert_eq!(channels, 256, "Expected 256 channels from flow matching");
 
@@ -480,9 +477,9 @@ impl<B: Backend> HeartCodecModel<B> {
 
     pub fn build_scalar_decode_plan(
         &self,
-        codes: Tensor<B, 3, Int>,
-        first_latent: Tensor<B, 3>,
-    ) -> ScalarDecodePlan<B> {
+        codes: Tensor<3, Int>,
+        first_latent: Tensor<3>,
+    ) -> ScalarDecodePlan {
         Self::build_scalar_decode_plan_impl(
             &self.flow_matching,
             self.guidance_scale,
@@ -492,14 +489,14 @@ impl<B: Backend> HeartCodecModel<B> {
         )
     }
 
-    pub fn decode_scalar_plan(&self, plan: ScalarDecodePlan<B>) -> Tensor<B, 3> {
+    pub fn decode_scalar_plan(&self, plan: ScalarDecodePlan) -> Tensor<3> {
         Self::decode_scalar_plan_impl(&self.scalar_model, plan)
     }
 
-    pub fn decode(&self, codes: Tensor<B, 3, Int>) -> Tensor<B, 3> {
+    pub fn decode(&self, codes: Tensor<3, Int>) -> Tensor<3> {
         let [batch, _num_quantizers, _seq_len] = codes.dims();
         let latent_length = (HEARTCODEC_SEGMENT_DURATION_SECONDS * 25.0) as usize;
-        let first_latent = Tensor::<B, 3>::random(
+        let first_latent = Tensor::<3>::random(
             [batch, latent_length, 256],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &codes.device(),
@@ -509,25 +506,25 @@ impl<B: Backend> HeartCodecModel<B> {
 
     pub fn decode_with_initial_latent(
         &self,
-        codes: Tensor<B, 3, Int>,
-        first_latent: Tensor<B, 3>,
-    ) -> Tensor<B, 3> {
+        codes: Tensor<3, Int>,
+        first_latent: Tensor<3>,
+    ) -> Tensor<3> {
         let plan = self.build_scalar_decode_plan(codes, first_latent);
         self.decode_scalar_plan(plan)
     }
 }
 
 #[derive(Module, Debug)]
-pub struct FlowMatching<B: Backend> {
-    pub cond_feature_emb: Linear<B>,
-    pub zero_cond_embedding1: Param<Tensor<B, 1>>,
-    pub estimator: LlamaTransformer<B>,
-    pub vq_embed: ResidualVQ<B>,
+pub struct FlowMatching {
+    pub cond_feature_emb: Linear,
+    pub zero_cond_embedding1: Param<Tensor<1>>,
+    pub estimator: LlamaTransformer,
+    pub vq_embed: ResidualVQ,
     pub debug_latent_steps: bool,
 }
 
-impl<B: Backend> FlowMatching<B> {
-    pub fn new(device: &B::Device, config: &HeartCodecConfig) -> Self {
+impl FlowMatching {
+    pub fn new(device: &burn::tensor::Device, config: &HeartCodecConfig) -> Self {
         Self {
             cond_feature_emb: LinearConfig::new(config.dim, config.dim)
                 .with_bias(true)
@@ -540,13 +537,16 @@ impl<B: Backend> FlowMatching<B> {
         }
     }
 
-    pub fn load_from_burnpack(path: &std::path::Path, device: &B::Device) -> Result<Self> {
+    pub fn load_from_burnpack(
+        path: &std::path::Path,
+        device: &burn::tensor::Device,
+    ) -> Result<Self> {
         let mut model = Self::new(device, &HeartCodecConfig::default());
-        let mut store = BurnpackStore::from_file(path).zero_copy(true);
+        let mut store = BurnpackStore::from_file(path);
 
         if let Err(load_err) = model.load_from(&mut store) {
-            let get_tensor = HeartCodecModel::<B>::snapshots_to_f32_lookup(path)?;
-            return HeartCodecModel::<B>::load_flow_matching_manually(
+            let get_tensor = HeartCodecModel::snapshots_to_f32_lookup(path)?;
+            return HeartCodecModel::load_flow_matching_manually(
                 &mut model, path, device, &get_tensor,
             )
             .map_err(|fallback_err| {
@@ -559,7 +559,7 @@ impl<B: Backend> FlowMatching<B> {
         Ok(model)
     }
 
-    fn interpolate_1d(x: &Tensor<B, 3>, scale_factor: usize) -> Tensor<B, 3> {
+    fn interpolate_1d(x: &Tensor<3>, scale_factor: usize) -> Tensor<3> {
         let [batch, seq_len, channels] = x.dims();
         if scale_factor <= 1 {
             return x.clone();
@@ -578,14 +578,14 @@ impl<B: Backend> FlowMatching<B> {
     #[allow(clippy::too_many_arguments)]
     pub fn solve_ode(
         &self,
-        conditioning: Tensor<B, 3>,
-        true_latents: Tensor<B, 3>,
+        conditioning: Tensor<3>,
+        true_latents: Tensor<3>,
         _latent_length: usize,
         incontext_length: usize,
         num_steps: usize,
         guidance_scale: f32,
-        initial_latent_override: Option<Tensor<B, 3>>,
-    ) -> Tensor<B, 3> {
+        initial_latent_override: Option<Tensor<3>>,
+    ) -> Tensor<3> {
         let device = conditioning.device();
         let [batch, _seq_len, _cond_dim] = conditioning.dims();
 
@@ -603,7 +603,7 @@ impl<B: Backend> FlowMatching<B> {
             .clone()
             .reshape([1, 1, 512])
             .repeat(&[batch, seq_len_interp, 1]);
-        let active_mask = Tensor::<B, 3>::from_data(
+        let active_mask = Tensor::<3>::from_data(
             TensorData::new(
                 latent_masks
                     .iter()
@@ -615,9 +615,9 @@ impl<B: Backend> FlowMatching<B> {
         )
         .repeat(&[batch, 1, 512]);
         let inactive_mask =
-            Tensor::<B, 3>::ones([batch, seq_len_interp, 512], &device) - active_mask.clone();
+            Tensor::<3>::ones([batch, seq_len_interp, 512], &device) - active_mask.clone();
         let cond_with_mask = cond_interp.clone() * active_mask + zero_cond.clone() * inactive_mask;
-        let uncond_mask = Tensor::<B, 3>::zeros([batch, seq_len_interp, 512], &device);
+        let uncond_mask = Tensor::<3>::zeros([batch, seq_len_interp, 512], &device);
 
         let mut latent = if let Some(initial_latent) = initial_latent_override {
             assert_eq!(
@@ -627,7 +627,7 @@ impl<B: Backend> FlowMatching<B> {
             );
             initial_latent
         } else {
-            Tensor::<B, 3>::random(
+            Tensor::<3>::random(
                 [batch, seq_len_interp, latent_dim],
                 burn::tensor::Distribution::Normal(0.0, 1.0),
                 &device,
@@ -637,7 +637,7 @@ impl<B: Backend> FlowMatching<B> {
             .iter()
             .map(|&m| if m == 1 { 1_i64 } else { 0_i64 })
             .collect::<Vec<_>>();
-        let incontext_mask = Tensor::<B, 3>::from_data(
+        let incontext_mask = Tensor::<3>::from_data(
             TensorData::new(
                 incontext_mask
                     .into_iter()
@@ -725,16 +725,16 @@ impl<B: Backend> FlowMatching<B> {
     #[allow(clippy::too_many_arguments)]
     pub fn inference_codes(
         &self,
-        codes: Vec<Tensor<B, 3, Int>>,
-        true_latents: Tensor<B, 3>,
+        codes: Vec<Tensor<3, Int>>,
+        true_latents: Tensor<3>,
         latent_length: usize,
         incontext_length: usize,
         guidance_scale: f32,
         num_steps: usize,
         disable_progress: bool,
         scenario: &str,
-        initial_latent_override: Option<Tensor<B, 3>>,
-    ) -> Tensor<B, 3> {
+        initial_latent_override: Option<Tensor<3>>,
+    ) -> Tensor<3> {
         let _ = disable_progress;
         let codes_bestrq_emb = codes
             .into_iter()
@@ -756,24 +756,24 @@ impl<B: Backend> FlowMatching<B> {
 
     fn gather_codebook(
         &self,
-        embed: Tensor<B, 3>,
-        indices: Tensor<B, 2, Int>,
+        embed: Tensor<3>,
+        indices: Tensor<2, Int>,
         codebook_size: usize,
         dim: usize,
-    ) -> Tensor<B, 3> {
+    ) -> Tensor<3> {
         let [batch, seq_len] = indices.dims();
-        let embed_2d: Tensor<B, 2> = embed.squeeze_dim(0);
-        let indices_flat: Tensor<B, 1, Int> = indices.reshape([batch * seq_len]);
+        let embed_2d: Tensor<2> = embed.squeeze_dim(0);
+        let indices_flat: Tensor<1, Int> = indices.reshape([batch * seq_len]);
         let max_idx = (codebook_size as i64) - 1;
-        let indices_clamped: Tensor<B, 1, Int> = indices_flat.clamp(0, max_idx);
+        let indices_clamped: Tensor<1, Int> = indices_flat.clamp(0, max_idx);
         let gathered = embed_2d.select(0, indices_clamped);
         gathered.reshape([batch, seq_len, dim])
     }
 
-    fn get_output_from_indices(&self, codes: Tensor<B, 3, Int>) -> Tensor<B, 3> {
+    fn get_output_from_indices(&self, codes: Tensor<3, Int>) -> Tensor<3> {
         let [batch, num_quantizers, seq_len] = codes.dims();
 
-        let mut quantized_sum = Tensor::<B, 3>::zeros([batch, seq_len, 32], &codes.device());
+        let mut quantized_sum = Tensor::<3>::zeros([batch, seq_len, 32], &codes.device());
         for q in 0..num_quantizers.min(self.vq_embed.layers.len()) {
             let q_codes_3d = codes.clone().slice([0..batch, q..q + 1, 0..seq_len]);
             let q_codes = q_codes_3d.reshape([batch, seq_len]);
@@ -803,14 +803,14 @@ impl<B: Backend> FlowMatching<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct ResidualVQ<B: Backend> {
-    pub layers: Vec<VQCodebook<B>>,
-    pub project_in: Linear<B>,
-    pub project_out: Linear<B>,
+pub struct ResidualVQ {
+    pub layers: Vec<VQCodebook>,
+    pub project_in: Linear,
+    pub project_out: Linear,
 }
 
-impl<B: Backend> ResidualVQ<B> {
-    pub fn new(device: &B::Device, config: &HeartCodecConfig) -> Self {
+impl ResidualVQ {
+    pub fn new(device: &burn::tensor::Device, config: &HeartCodecConfig) -> Self {
         let layers: Vec<_> = (0..config.num_quantizers)
             .map(|_| VQCodebook::new(device, config.codebook_size, config.codebook_dim))
             .collect();
@@ -828,7 +828,7 @@ impl<B: Backend> ResidualVQ<B> {
         }
     }
 
-    pub fn load_from_dot_notation<F>(device: &B::Device, get_tensor: &F) -> Result<Self>
+    pub fn load_from_dot_notation<F>(device: &burn::tensor::Device, get_tensor: &F) -> Result<Self>
     where
         F: Fn(&str) -> Option<(Vec<f32>, Vec<usize>)>,
     {
@@ -838,7 +838,7 @@ impl<B: Backend> ResidualVQ<B> {
 
             let embed_name = format!("{}.embed", prefix);
             let embed = if let Some((data, shape)) = get_tensor(&embed_name) {
-                Tensor::<B, 3>::from_data(
+                Tensor::<3>::from_data(
                     TensorData::new(data, [shape[0], shape[1], shape[2]]),
                     device,
                 )
@@ -848,14 +848,14 @@ impl<B: Backend> ResidualVQ<B> {
 
             let cluster_size_name = format!("{}.cluster_size", prefix);
             let cluster_size = if let Some((data, shape)) = get_tensor(&cluster_size_name) {
-                Tensor::<B, 2>::from_data(TensorData::new(data, [shape[0], shape[1]]), device)
+                Tensor::<2>::from_data(TensorData::new(data, [shape[0], shape[1]]), device)
             } else {
                 Tensor::zeros([1, 8192], device)
             };
 
             let embed_avg_name = format!("{}.embed_avg", prefix);
             let embed_avg = if let Some((data, shape)) = get_tensor(&embed_avg_name) {
-                Tensor::<B, 3>::from_data(
+                Tensor::<3>::from_data(
                     TensorData::new(data, [shape[0], shape[1], shape[2]]),
                     device,
                 )
@@ -897,12 +897,12 @@ impl<B: Backend> ResidualVQ<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct VQCodebook<B: Backend> {
-    pub _codebook: VQCodebookInner<B>,
+pub struct VQCodebook {
+    pub _codebook: VQCodebookInner,
 }
 
-impl<B: Backend> VQCodebook<B> {
-    pub fn new(device: &B::Device, codebook_size: usize, codebook_dim: usize) -> Self {
+impl VQCodebook {
+    pub fn new(device: &burn::tensor::Device, codebook_size: usize, codebook_dim: usize) -> Self {
         Self {
             _codebook: VQCodebookInner::new(device, codebook_size, codebook_dim),
         }
@@ -910,14 +910,14 @@ impl<B: Backend> VQCodebook<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct VQCodebookInner<B: Backend> {
-    pub cluster_size: Param<Tensor<B, 2>>,
-    pub embed: Param<Tensor<B, 3>>,
-    pub embed_avg: Param<Tensor<B, 3>>,
+pub struct VQCodebookInner {
+    pub cluster_size: Param<Tensor<2>>,
+    pub embed: Param<Tensor<3>>,
+    pub embed_avg: Param<Tensor<3>>,
 }
 
-impl<B: Backend> VQCodebookInner<B> {
-    pub fn new(device: &B::Device, codebook_size: usize, codebook_dim: usize) -> Self {
+impl VQCodebookInner {
+    pub fn new(device: &burn::tensor::Device, codebook_size: usize, codebook_dim: usize) -> Self {
         Self {
             cluster_size: Param::from_tensor(Tensor::zeros([1, codebook_size], device)),
             embed: Param::from_tensor(Tensor::zeros([1, codebook_size, codebook_dim], device)),
@@ -927,22 +927,22 @@ impl<B: Backend> VQCodebookInner<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct LlamaTransformer<B: Backend> {
-    pub proj_in: ProjectLayer<B>,
-    pub proj_out: ProjectLayer<B>,
-    pub connection_proj: ProjectLayer<B>,
-    pub transformer_blocks: Vec<TransformerBlock<B>>,
-    pub transformer_blocks_2: Vec<TransformerBlock<B>>,
-    pub norm_out: LayerNorm<B>,
-    pub norm_out_2: LayerNorm<B>,
-    pub adaln_single: AdaLayerNormSingle<B>,
-    pub adaln_single_2: AdaLayerNormSingle<B>,
-    pub scale_shift_table: Param<Tensor<B, 2>>,
-    pub scale_shift_table_2: Param<Tensor<B, 2>>,
+pub struct LlamaTransformer {
+    pub proj_in: ProjectLayer,
+    pub proj_out: ProjectLayer,
+    pub connection_proj: ProjectLayer,
+    pub transformer_blocks: Vec<TransformerBlock>,
+    pub transformer_blocks_2: Vec<TransformerBlock>,
+    pub norm_out: LayerNorm,
+    pub norm_out_2: LayerNorm,
+    pub adaln_single: AdaLayerNormSingle,
+    pub adaln_single_2: AdaLayerNormSingle,
+    pub scale_shift_table: Param<Tensor<2>>,
+    pub scale_shift_table_2: Param<Tensor<2>>,
 }
 
-impl<B: Backend> LlamaTransformer<B> {
-    pub fn new(device: &B::Device, config: &HeartCodecConfig) -> Self {
+impl LlamaTransformer {
+    pub fn new(device: &burn::tensor::Device, config: &HeartCodecConfig) -> Self {
         let inner_dim = config.num_attention_heads * config.attention_head_dim;
         let inner_dim_2 = inner_dim * 2;
         let _latent_dim = config.latent_hidden_dim;
@@ -993,7 +993,7 @@ impl<B: Backend> LlamaTransformer<B> {
         }
     }
 
-    pub fn load_from_burnpack<F>(device: &B::Device, get_tensor: &F) -> Result<Self>
+    pub fn load_from_burnpack<F>(device: &burn::tensor::Device, get_tensor: &F) -> Result<Self>
     where
         F: Fn(&str) -> Option<(Vec<f32>, Vec<usize>)>,
     {
@@ -1102,7 +1102,7 @@ impl<B: Backend> LlamaTransformer<B> {
         })
     }
 
-    pub fn forward(&self, hidden_states: &Tensor<B, 3>, t: f32, step: usize) -> Tensor<B, 3> {
+    pub fn forward(&self, hidden_states: &Tensor<3>, t: f32, step: usize) -> Tensor<3> {
         let mut s = self.proj_in.forward(hidden_states.clone(), step);
         let (timestep_mod, embedded_timestep) = self.adaln_single.forward(t, s.dtype());
 
@@ -1139,16 +1139,21 @@ impl<B: Backend> LlamaTransformer<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct TransformerBlock<B: Backend> {
-    pub attn: Attention<B>,
-    pub attn_norm: RmsNorm<B>,
-    pub mlp: Mlp<B>,
-    pub mlp_norm: RmsNorm<B>,
-    pub scale_shift_table: Param<Tensor<B, 2>>,
+pub struct TransformerBlock {
+    pub attn: Attention,
+    pub attn_norm: RmsNorm,
+    pub mlp: Mlp,
+    pub mlp_norm: RmsNorm,
+    pub scale_shift_table: Param<Tensor<2>>,
 }
 
-impl<B: Backend> TransformerBlock<B> {
-    pub fn new(device: &B::Device, dim: usize, num_heads: usize, head_dim: usize) -> Self {
+impl TransformerBlock {
+    pub fn new(
+        device: &burn::tensor::Device,
+        dim: usize,
+        num_heads: usize,
+        head_dim: usize,
+    ) -> Self {
         Self {
             attn: Attention::new(device, dim, num_heads, head_dim),
             attn_norm: RmsNorm::new(device, dim, 1e-6),
@@ -1159,7 +1164,7 @@ impl<B: Backend> TransformerBlock<B> {
     }
 
     pub fn load_from_tensors<F>(
-        device: &B::Device,
+        device: &burn::tensor::Device,
         get_tensor: &F,
         prefix: &str,
         dim: usize,
@@ -1170,7 +1175,7 @@ impl<B: Backend> TransformerBlock<B> {
         F: Fn(&str) -> Option<(Vec<f32>, Vec<usize>)>,
     {
         let inner_dim = num_heads * head_dim;
-        let hidden_dim = Mlp::<B>::compute_hidden_dim(dim);
+        let hidden_dim = Mlp::compute_hidden_dim(dim);
 
         let attn = Attention {
             q_proj: load_linear_from_tensors(
@@ -1254,11 +1259,11 @@ impl<B: Backend> TransformerBlock<B> {
 
     pub fn forward(
         &self,
-        x: Tensor<B, 3>,
-        timestep: Option<Tensor<B, 3>>,
+        x: Tensor<3>,
+        timestep: Option<Tensor<3>>,
         _dump_attention: bool,
         _step: usize,
-    ) -> Tensor<B, 3> {
+    ) -> Tensor<3> {
         if let Some(timestep) = timestep {
             let [batch, _seq, dim] = x.dims();
             let shift_scale = self.scale_shift_table.val().clone().unsqueeze_dim(0)
@@ -1292,18 +1297,23 @@ impl<B: Backend> TransformerBlock<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct Attention<B: Backend> {
-    pub q_proj: Linear<B>,
-    pub k_proj: Linear<B>,
-    pub v_proj: Linear<B>,
-    pub o_proj: Linear<B>,
+pub struct Attention {
+    pub q_proj: Linear,
+    pub k_proj: Linear,
+    pub v_proj: Linear,
+    pub o_proj: Linear,
     pub num_heads: usize,
     pub head_dim: usize,
     pub rope_dim: usize,
 }
 
-impl<B: Backend> Attention<B> {
-    pub fn new(device: &B::Device, dim: usize, num_heads: usize, head_dim: usize) -> Self {
+impl Attention {
+    pub fn new(
+        device: &burn::tensor::Device,
+        dim: usize,
+        num_heads: usize,
+        head_dim: usize,
+    ) -> Self {
         let inner_dim = num_heads * head_dim;
         Self {
             q_proj: LinearConfig::new(dim, inner_dim)
@@ -1328,7 +1338,7 @@ impl<B: Backend> Attention<B> {
         }
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>, _dump_attention: bool, _step: usize) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>, _dump_attention: bool, _step: usize) -> Tensor<3> {
         let [batch, seq_len, dim] = x.dims();
         let num_heads = self.num_heads;
         let head_dim = self.head_dim;
@@ -1361,11 +1371,7 @@ impl<B: Backend> Attention<B> {
         self.o_proj.forward(out)
     }
 
-    fn apply_rope(
-        q: Tensor<B, 4>,
-        k: Tensor<B, 4>,
-        rope_dim: usize,
-    ) -> (Tensor<B, 4>, Tensor<B, 4>) {
+    fn apply_rope(q: Tensor<4>, k: Tensor<4>, rope_dim: usize) -> (Tensor<4>, Tensor<4>) {
         if rope_dim == 0 {
             return (q, k);
         }
@@ -1382,19 +1388,19 @@ impl<B: Backend> Attention<B> {
             inv_freq.push(1.0 / base.powf(exponent));
         }
 
-        let inv_freq = Tensor::<B, 1>::from_data(TensorData::new(inv_freq, [rope_pairs]), &device);
+        let inv_freq = Tensor::<1>::from_data(TensorData::new(inv_freq, [rope_pairs]), &device);
         let positions = {
             let mut data = Vec::with_capacity(seq_len);
             for i in 0..seq_len {
                 data.push(i as f32);
             }
-            Tensor::<B, 2>::from_data(TensorData::new(data, [seq_len, 1]), &device).cast(dtype)
+            Tensor::<2>::from_data(TensorData::new(data, [seq_len, 1]), &device).cast(dtype)
         };
         let freqs = positions.matmul(inv_freq.reshape([1, rope_pairs]));
         let sin = freqs.clone().sin().reshape([1, 1, seq_len, rope_pairs]);
         let cos = freqs.cos().reshape([1, 1, seq_len, rope_pairs]);
 
-        let rotate = |x: Tensor<B, 4>| {
+        let rotate = |x: Tensor<4>| {
             let head = x
                 .clone()
                 .slice([0..batch, 0..heads, 0..seq_len, 0..rope_dim]);
@@ -1418,14 +1424,14 @@ impl<B: Backend> Attention<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct Mlp<B: Backend> {
-    pub gate: Linear<B>,
-    pub up: Linear<B>,
-    pub down: Linear<B>,
+pub struct Mlp {
+    pub gate: Linear,
+    pub up: Linear,
+    pub down: Linear,
 }
 
-impl<B: Backend> Mlp<B> {
-    pub fn new(device: &B::Device, dim: usize) -> Self {
+impl Mlp {
+    pub fn new(device: &burn::tensor::Device, dim: usize) -> Self {
         let hidden_dim = Self::compute_hidden_dim(dim);
         Self {
             gate: LinearConfig::new(dim, hidden_dim)
@@ -1449,7 +1455,7 @@ impl<B: Backend> Mlp<B> {
         multiple_of * hidden_dim.div_ceil(multiple_of)
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         use burn::tensor::activation::silu;
 
         let gate = self.gate.forward(x.clone());
@@ -1464,18 +1470,18 @@ impl<B: Backend> Mlp<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct RmsNorm<B: Backend> {
-    pub weight: Param<Tensor<B, 1>>,
+pub struct RmsNorm {
+    pub weight: Param<Tensor<1>>,
 }
 
-impl<B: Backend> RmsNorm<B> {
-    pub fn new(device: &B::Device, dim: usize, _eps: f64) -> Self {
+impl RmsNorm {
+    pub fn new(device: &burn::tensor::Device, dim: usize, _eps: f64) -> Self {
         Self {
             weight: Param::from_tensor(Tensor::ones([dim], device)),
         }
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         let eps = 1e-6;
         let weight = self.weight.val();
 
@@ -1495,13 +1501,13 @@ impl<B: Backend> RmsNorm<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct AdaLayerNormSingle<B: Backend> {
-    pub emb: PixArtAlphaCombinedFlowEmbeddings<B>,
-    pub linear: Linear<B>,
+pub struct AdaLayerNormSingle {
+    pub emb: PixArtAlphaCombinedFlowEmbeddings,
+    pub linear: Linear,
 }
 
-impl<B: Backend> AdaLayerNormSingle<B> {
-    pub fn new(device: &B::Device, embedding_dim: usize) -> Self {
+impl AdaLayerNormSingle {
+    pub fn new(device: &burn::tensor::Device, embedding_dim: usize) -> Self {
         Self {
             emb: PixArtAlphaCombinedFlowEmbeddings::new(device, embedding_dim),
             linear: LinearConfig::new(embedding_dim, 6 * embedding_dim)
@@ -1512,7 +1518,7 @@ impl<B: Backend> AdaLayerNormSingle<B> {
     }
 
     pub fn load_from_tensors<F>(
-        device: &B::Device,
+        device: &burn::tensor::Device,
         get_tensor: &F,
         prefix: &str,
         embedding_dim: usize,
@@ -1539,7 +1545,7 @@ impl<B: Backend> AdaLayerNormSingle<B> {
         Ok(Self { emb, linear })
     }
 
-    pub fn forward(&self, timestep: f32, hidden_dtype: DType) -> (Tensor<B, 3>, Tensor<B, 2>) {
+    pub fn forward(&self, timestep: f32, hidden_dtype: DType) -> (Tensor<3>, Tensor<2>) {
         use burn::tensor::activation::silu;
 
         let embedded_timestep = self.emb.forward(timestep, hidden_dtype);
@@ -1553,19 +1559,19 @@ impl<B: Backend> AdaLayerNormSingle<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct PixArtAlphaCombinedFlowEmbeddings<B: Backend> {
-    pub timestep_embedder: TimestepEmbedding<B>,
+pub struct PixArtAlphaCombinedFlowEmbeddings {
+    pub timestep_embedder: TimestepEmbedding,
 }
 
-impl<B: Backend> PixArtAlphaCombinedFlowEmbeddings<B> {
-    pub fn new(device: &B::Device, embedding_dim: usize) -> Self {
+impl PixArtAlphaCombinedFlowEmbeddings {
+    pub fn new(device: &burn::tensor::Device, embedding_dim: usize) -> Self {
         Self {
             timestep_embedder: TimestepEmbedding::new(device, 512, embedding_dim),
         }
     }
 
     pub fn load_from_tensors<F>(
-        device: &B::Device,
+        device: &burn::tensor::Device,
         get_tensor: &F,
         prefix: &str,
         embedding_dim: usize,
@@ -1584,7 +1590,7 @@ impl<B: Backend> PixArtAlphaCombinedFlowEmbeddings<B> {
         Ok(Self { timestep_embedder })
     }
 
-    pub fn forward(&self, timestep: f32, _hidden_dtype: DType) -> Tensor<B, 2> {
+    pub fn forward(&self, timestep: f32, _hidden_dtype: DType) -> Tensor<2> {
         let device = self.timestep_embedder.linear_1.weight.device();
         let flow_t_size = 512;
         let half = flow_t_size / 2;
@@ -1599,19 +1605,19 @@ impl<B: Backend> PixArtAlphaCombinedFlowEmbeddings<B> {
             let angle = timestep * freq * 1000.0;
             data.push(angle.sin());
         }
-        let timestep = Tensor::<B, 2>::from_data(TensorData::new(data, [1, flow_t_size]), &device);
+        let timestep = Tensor::<2>::from_data(TensorData::new(data, [1, flow_t_size]), &device);
         self.timestep_embedder.forward(timestep)
     }
 }
 
 #[derive(Module, Debug)]
-pub struct TimestepEmbedding<B: Backend> {
-    pub linear_1: Linear<B>,
-    pub linear_2: Linear<B>,
+pub struct TimestepEmbedding {
+    pub linear_1: Linear,
+    pub linear_2: Linear,
 }
 
-impl<B: Backend> TimestepEmbedding<B> {
-    pub fn new(device: &B::Device, in_channels: usize, time_embed_dim: usize) -> Self {
+impl TimestepEmbedding {
+    pub fn new(device: &burn::tensor::Device, in_channels: usize, time_embed_dim: usize) -> Self {
         Self {
             linear_1: LinearConfig::new(in_channels, time_embed_dim)
                 .with_bias(true)
@@ -1625,7 +1631,7 @@ impl<B: Backend> TimestepEmbedding<B> {
     }
 
     pub fn load_from_tensors<F>(
-        device: &B::Device,
+        device: &burn::tensor::Device,
         get_tensor: &F,
         prefix: &str,
         in_channels: usize,
@@ -1653,7 +1659,7 @@ impl<B: Backend> TimestepEmbedding<B> {
         Ok(Self { linear_1, linear_2 })
     }
 
-    pub fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+    pub fn forward(&self, x: Tensor<2>) -> Tensor<2> {
         use burn::tensor::activation::silu;
 
         let emb = self.linear_1.forward(x);
@@ -1662,16 +1668,16 @@ impl<B: Backend> TimestepEmbedding<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct ProjectLayer<B: Backend> {
-    pub ffn_1: Conv1d<B>,
-    pub ffn_2: Linear<B>,
+pub struct ProjectLayer {
+    pub ffn_1: Conv1d,
+    pub ffn_2: Linear,
     pub kernel_size: usize,
     pub out_channels: usize,
 }
 
-impl<B: Backend> ProjectLayer<B> {
+impl ProjectLayer {
     pub fn new(
-        device: &B::Device,
+        device: &burn::tensor::Device,
         in_channels: usize,
         out_channels: usize,
         kernel_size: usize,
@@ -1690,7 +1696,7 @@ impl<B: Backend> ProjectLayer<B> {
         }
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>, _step: usize) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>, _step: usize) -> Tensor<3> {
         let x_t = x.swap_dims(1, 2);
 
         let conv_out = self.forward_conv1d_exact(x_t);
@@ -1700,7 +1706,7 @@ impl<B: Backend> ProjectLayer<B> {
         self.ffn_2.forward(conv_out_t)
     }
 
-    fn forward_conv1d_exact(&self, input: Tensor<B, 3>) -> Tensor<B, 3> {
+    fn forward_conv1d_exact(&self, input: Tensor<3>) -> Tensor<3> {
         let [batch, in_channels, seq_len] = input.dims();
         let [out_channels, weight_in_channels, kernel_size] = self.ffn_1.weight.dims();
         assert_eq!(
@@ -1710,11 +1716,11 @@ impl<B: Backend> ProjectLayer<B> {
 
         let padding = kernel_size / 2;
         let device = input.device();
-        let left = Tensor::<B, 3>::zeros([batch, in_channels, padding], &device);
-        let right = Tensor::<B, 3>::zeros([batch, in_channels, padding], &device);
+        let left = Tensor::<3>::zeros([batch, in_channels, padding], &device);
+        let right = Tensor::<3>::zeros([batch, in_channels, padding], &device);
         let padded = Tensor::cat(vec![left, input, right], 2);
 
-        let mut out = Tensor::<B, 3>::zeros([batch, seq_len, out_channels], &device);
+        let mut out = Tensor::<3>::zeros([batch, seq_len, out_channels], &device);
         for k in 0..kernel_size {
             let x_k = padded
                 .clone()
@@ -1744,7 +1750,7 @@ impl<B: Backend> ProjectLayer<B> {
     }
 
     pub fn load_from_tensors<F>(
-        device: &B::Device,
+        device: &burn::tensor::Device,
         get_tensor: &F,
         prefix: &str,
         in_channels: usize,
@@ -1771,12 +1777,11 @@ impl<B: Backend> ProjectLayer<B> {
                 && b_shape.len() == 1
                 && b_shape[0] == out_channels
             {
-                let weight = Tensor::<B, 3>::from_data(
+                let weight = Tensor::<3>::from_data(
                     TensorData::new(w_data, [out_channels, in_channels, kernel_size]),
                     device,
                 );
-                let bias =
-                    Tensor::<B, 1>::from_data(TensorData::new(b_data, [out_channels]), device);
+                let bias = Tensor::<1>::from_data(TensorData::new(b_data, [out_channels]), device);
 
                 Conv1d {
                     weight: Param::from_tensor(weight),
@@ -1816,31 +1821,31 @@ impl<B: Backend> ProjectLayer<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct ScalarModel<B: Backend> {
-    pub decoder_0: WNConv1d<B>,
-    pub decoder_1: ResDecoderBlock<B>,
-    pub decoder_2: ResDecoderBlock<B>,
-    pub decoder_3: ResDecoderBlock<B>,
-    pub decoder_4: ResDecoderBlock<B>,
-    pub decoder_5: ResDecoderBlock<B>,
-    pub decoder_6: PostProcessor<B>,
-    pub decoder_7: WNConv1d<B>,
+pub struct ScalarModel {
+    pub decoder_0: WNConv1d,
+    pub decoder_1: ResDecoderBlock,
+    pub decoder_2: ResDecoderBlock,
+    pub decoder_3: ResDecoderBlock,
+    pub decoder_4: ResDecoderBlock,
+    pub decoder_5: ResDecoderBlock,
+    pub decoder_6: PostProcessor,
+    pub decoder_7: WNConv1d,
 }
 
-impl<B: Backend> ScalarModel<B> {
-    pub fn from_burnpack(path: &std::path::Path, device: &B::Device) -> Result<Self> {
+impl ScalarModel {
+    pub fn from_burnpack(path: &std::path::Path, device: &burn::tensor::Device) -> Result<Self> {
         let mut model = Self::new(device, &HeartCodecConfig::default());
-        let mut store = BurnpackStore::from_file(path).zero_copy(true);
+        let mut store = BurnpackStore::from_file(path);
 
         if model.load_from(&mut store).is_ok() {
             return Ok(model);
         }
 
-        let get_tensor = HeartCodecModel::<B>::snapshots_to_f32_lookup(path)?;
+        let get_tensor = HeartCodecModel::snapshots_to_f32_lookup(path)?;
         Self::load_from_dot_notation(path, device, &get_tensor)
     }
 
-    pub fn new(device: &B::Device, _config: &HeartCodecConfig) -> Self {
+    pub fn new(device: &burn::tensor::Device, _config: &HeartCodecConfig) -> Self {
         let config = HeartCodecConfig::default();
         Self {
             decoder_0: WNConv1d::new(
@@ -1869,7 +1874,7 @@ impl<B: Backend> ScalarModel<B> {
 
     pub fn load_from_dot_notation<F>(
         _path: &std::path::Path,
-        device: &B::Device,
+        device: &burn::tensor::Device,
         get_tensor: &F,
     ) -> Result<Self>
     where
@@ -1883,7 +1888,7 @@ impl<B: Backend> ScalarModel<B> {
                          ksize: usize,
                          padding: usize,
                          causal: bool|
-         -> WNConv1d<B> {
+         -> WNConv1d {
             let weight_g_name = format!("{}.weight_g", prefix);
             let weight_v_name = format!("{}.weight_v", prefix);
             let bias_name = format!("{}.bias", prefix);
@@ -1994,7 +1999,7 @@ impl<B: Backend> ScalarModel<B> {
         })
     }
 
-    pub fn decode(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn decode(&self, x: Tensor<3>) -> Tensor<3> {
         let x_quantized = (x.clone() * 9.0).round() / 9.0;
 
         let h = self.decoder_0.forward(x_quantized);
@@ -2007,7 +2012,7 @@ impl<B: Backend> ScalarModel<B> {
         self.decoder_7.forward(h)
     }
 
-    pub fn decode_with_sync(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn decode_with_sync(&self, x: Tensor<3>) -> Tensor<3> {
         let x_quantized = (x.clone() * 9.0).round() / 9.0;
 
         let h = self.decoder_0.forward(x_quantized);
@@ -2034,7 +2039,7 @@ impl<B: Backend> ScalarModel<B> {
         self.decoder_7.forward(h)
     }
 
-    pub fn decode_latent_with_sync(&self, latent: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn decode_latent_with_sync(&self, latent: Tensor<3>) -> Tensor<3> {
         let [batch, seq_len, channels] = latent.dims();
         assert_eq!(
             channels, 256,
@@ -2051,13 +2056,13 @@ impl<B: Backend> ScalarModel<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct ResDecoderBlock<B: Backend> {
-    pub up_conv: WNConvTranspose1d<B>,
-    pub convs: Vec<ResidualUnit<B>>,
+pub struct ResDecoderBlock {
+    pub up_conv: WNConvTranspose1d,
+    pub convs: Vec<ResidualUnit>,
 }
 
-impl<B: Backend> ResDecoderBlock<B> {
-    pub fn new(device: &B::Device, in_ch: usize, out_ch: usize) -> Self {
+impl ResDecoderBlock {
+    pub fn new(device: &burn::tensor::Device, in_ch: usize, out_ch: usize) -> Self {
         let (kernel_size, stride) = match (in_ch, out_ch) {
             (2048, 1024) => (10, 5),
             (1024, 512) => (8, 4),
@@ -2090,7 +2095,7 @@ impl<B: Backend> ResDecoderBlock<B> {
     }
 
     pub fn load_from_dot_notation<F>(
-        device: &B::Device,
+        device: &burn::tensor::Device,
         get_tensor: &F,
         prefix: &str,
         in_ch: usize,
@@ -2215,7 +2220,7 @@ impl<B: Backend> ResDecoderBlock<B> {
         Ok(Self { up_conv, convs })
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         let mut h = self.up_conv.forward(x);
         for block in &self.convs {
             h = block.forward(h);
@@ -2225,15 +2230,15 @@ impl<B: Backend> ResDecoderBlock<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct ResidualUnit<B: Backend> {
-    pub conv1: WNConv1d<B>,
-    pub conv2: WNConv1d<B>,
-    pub activation1: PReLU<B>,
-    pub activation2: PReLU<B>,
+pub struct ResidualUnit {
+    pub conv1: WNConv1d,
+    pub conv2: WNConv1d,
+    pub activation1: PReLU,
+    pub activation2: PReLU,
 }
 
-impl<B: Backend> ResidualUnit<B> {
-    pub fn new(device: &B::Device, channels: usize, dilation: usize) -> Self {
+impl ResidualUnit {
+    pub fn new(device: &burn::tensor::Device, channels: usize, dilation: usize) -> Self {
         Self {
             conv1: WNConv1d::new(
                 device,
@@ -2253,7 +2258,7 @@ impl<B: Backend> ResidualUnit<B> {
     }
 
     pub fn load_from_dot_notation<F>(
-        device: &B::Device,
+        device: &burn::tensor::Device,
         get_tensor: &F,
         prefix: &str,
         channels: usize,
@@ -2266,7 +2271,7 @@ impl<B: Backend> ResidualUnit<B> {
             WNConv1dLoadArgs, load_prelu_from_tensor, load_wnconv_from_tensors,
         };
 
-        let load_conv = |conv_prefix: &str, ksize: usize, dilation: usize| -> WNConv1d<B> {
+        let load_conv = |conv_prefix: &str, ksize: usize, dilation: usize| -> WNConv1d {
             let weight_g_name = format!("{}.weight_g", conv_prefix);
             let weight_v_name = format!("{}.weight_v", conv_prefix);
             let bias_name = format!("{}.bias", conv_prefix);
@@ -2379,7 +2384,7 @@ impl<B: Backend> ResidualUnit<B> {
         })
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         let h = self.activation1.forward(self.conv1.forward(x.clone()));
         let h = self.activation2.forward(self.conv2.forward(h));
         x + h
@@ -2387,18 +2392,18 @@ impl<B: Backend> ResidualUnit<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct PReLU<B: Backend> {
-    pub weight: Param<Tensor<B, 1>>,
+pub struct PReLU {
+    pub weight: Param<Tensor<1>>,
 }
 
-impl<B: Backend> PReLU<B> {
-    pub fn new(device: &B::Device) -> Self {
+impl PReLU {
+    pub fn new(device: &burn::tensor::Device) -> Self {
         Self {
             weight: Param::from_tensor(Tensor::ones([1], device) * 0.25),
         }
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         use burn::tensor::activation::relu;
 
         let weight = self.weight.val().reshape([1, 1, 1]);
@@ -2500,7 +2505,7 @@ fn wav_f32_stream_info(channels: usize, sample_rate: u32) -> StreamInfo {
     }
 }
 
-pub fn frames_to_tensor<B: Backend>(frames: &[Vec<i64>], device: &B::Device) -> Tensor<B, 3, Int> {
+pub fn frames_to_tensor(frames: &[Vec<i64>], device: &burn::tensor::Device) -> Tensor<3, Int> {
     let num_frames = frames.len();
     let num_codebooks = if num_frames > 0 { frames[0].len() } else { 8 };
 
@@ -2524,13 +2529,13 @@ pub fn frames_to_tensor<B: Backend>(frames: &[Vec<i64>], device: &B::Device) -> 
     )
 }
 
-fn load_linear_from_tensors<B: Backend, F>(
-    device: &B::Device,
+fn load_linear_from_tensors<F>(
+    device: &burn::tensor::Device,
     get_tensor: &F,
     prefix: &str,
     in_dim: usize,
     out_dim: usize,
-) -> Result<Linear<B>>
+) -> Result<Linear>
 where
     F: Fn(&str) -> Option<(Vec<f32>, Vec<usize>)>,
 {
@@ -2545,9 +2550,9 @@ where
                     transposed[j * out_dim + i] = data[i * in_dim + j];
                 }
             }
-            Tensor::<B, 2>::from_data(TensorData::new(transposed, [in_dim, out_dim]), device)
+            Tensor::<2>::from_data(TensorData::new(transposed, [in_dim, out_dim]), device)
         } else if shape.len() == 2 && shape[0] == in_dim && shape[1] == out_dim {
-            Tensor::<B, 2>::from_data(TensorData::new(data, [in_dim, out_dim]), device)
+            Tensor::<2>::from_data(TensorData::new(data, [in_dim, out_dim]), device)
         } else {
             Tensor::zeros([in_dim, out_dim], device)
         }
@@ -2557,7 +2562,7 @@ where
 
     let bias = if let Some((data, shape)) = get_tensor(&bias_name) {
         if shape.len() == 1 && shape[0] == out_dim {
-            Some(Tensor::<B, 1>::from_data(
+            Some(Tensor::<1>::from_data(
                 TensorData::new(data, [out_dim]),
                 device,
             ))
@@ -2574,12 +2579,12 @@ where
     })
 }
 
-fn load_rmsnorm_from_tensors<B: Backend, F>(
-    device: &B::Device,
+fn load_rmsnorm_from_tensors<F>(
+    device: &burn::tensor::Device,
     get_tensor: &F,
     prefix: &str,
     dim: usize,
-) -> Result<RmsNorm<B>>
+) -> Result<RmsNorm>
 where
     F: Fn(&str) -> Option<(Vec<f32>, Vec<usize>)>,
 {
@@ -2587,7 +2592,7 @@ where
 
     let weight = if let Some((data, shape)) = get_tensor(&weight_name) {
         if shape.len() == 1 && shape[0] == dim {
-            Tensor::<B, 1>::from_data(TensorData::new(data, [dim]), device)
+            Tensor::<1>::from_data(TensorData::new(data, [dim]), device)
         } else {
             Tensor::ones([dim], device)
         }
@@ -2600,12 +2605,12 @@ where
     })
 }
 
-fn load_param_tensor<B: Backend, F, const D: usize>(
-    device: &B::Device,
+fn load_param_tensor<F, const D: usize>(
+    device: &burn::tensor::Device,
     get_tensor: &F,
     name: &str,
     shape: [usize; D],
-) -> Result<Param<Tensor<B, D>>>
+) -> Result<Param<Tensor<D>>>
 where
     F: Fn(&str) -> Option<(Vec<f32>, Vec<usize>)>,
 {
@@ -2790,15 +2795,14 @@ mod tests {
 
     #[test]
     fn frames_to_tensor_converts_correctly() {
-        use burn::backend::ndarray::NdArray;
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
+        let device = burn::tensor::Device::flex();
         let frames: Vec<Vec<i64>> = vec![
             vec![1, 2, 3, 4, 5, 6, 7, 8],
             vec![9, 10, 11, 12, 13, 14, 15, 16],
             vec![17, 18, 19, 20, 21, 22, 23, 24],
         ];
 
-        let tensor = super::frames_to_tensor::<NdArray<f32>>(&frames, &device);
+        let tensor = super::frames_to_tensor(&frames, &device);
         let dims = tensor.dims();
         assert_eq!(dims[0], 1);
         assert_eq!(dims[1], 8);
@@ -2807,12 +2811,10 @@ mod tests {
 
     #[test]
     fn frames_to_tensor_empty_frames() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
+        let device = burn::tensor::Device::flex();
         let frames: Vec<Vec<i64>> = vec![];
 
-        let tensor = super::frames_to_tensor::<NdArray<f32>>(&frames, &device);
+        let tensor = super::frames_to_tensor(&frames, &device);
         let dims = tensor.dims();
         assert_eq!(dims[0], 1);
         assert_eq!(dims[1], 8);
@@ -2822,27 +2824,21 @@ mod tests {
     #[test]
     #[should_panic(expected = "inconsistent codebook count")]
     fn frames_to_tensor_rejects_inconsistent_codebooks() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
+        let device = burn::tensor::Device::flex();
         let frames: Vec<Vec<i64>> = vec![vec![1, 2, 3, 4, 5, 6, 7, 8], vec![9, 10, 11]];
 
-        let _tensor = super::frames_to_tensor::<NdArray<f32>>(&frames, &device);
+        let _tensor = super::frames_to_tensor(&frames, &device);
     }
 
     #[test]
     fn prelu_activation_forward() {
-        use burn::backend::ndarray::NdArray;
+        let device = burn::tensor::Device::flex();
+        let prelu = super::PReLU::new(&device);
 
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let prelu = super::PReLU::<NdArray<f32>>::new(&device);
-
-        let input = Tensor::<NdArray<f32>, 3>::from_data(
-            TensorData::new(vec![1.0, 2.0, 3.0], [1, 1, 3]),
-            &device,
-        );
+        let input =
+            Tensor::<3>::from_data(TensorData::new(vec![1.0, 2.0, 3.0], [1, 1, 3]), &device);
         let output = prelu.forward(input);
-        let data = output.to_data().to_vec::<f32>().unwrap();
+        let data = output.to_data().try_to_vec::<f32>().unwrap();
         assert!((data[0] - 1.0).abs() < 1e-6);
         assert!((data[1] - 2.0).abs() < 1e-6);
         assert!((data[2] - 3.0).abs() < 1e-6);
@@ -2850,17 +2846,12 @@ mod tests {
 
     #[test]
     fn prelu_activation_negative_values() {
-        use burn::backend::ndarray::NdArray;
+        let device = burn::tensor::Device::flex();
+        let prelu = super::PReLU::new(&device);
 
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let prelu = super::PReLU::<NdArray<f32>>::new(&device);
-
-        let input = Tensor::<NdArray<f32>, 3>::from_data(
-            TensorData::new(vec![-4.0, -8.0], [1, 1, 2]),
-            &device,
-        );
+        let input = Tensor::<3>::from_data(TensorData::new(vec![-4.0, -8.0], [1, 1, 2]), &device);
         let output = prelu.forward(input);
-        let data = output.to_data().to_vec::<f32>().unwrap();
+        let data = output.to_data().try_to_vec::<f32>().unwrap();
 
         assert!((data[0] - (-1.0)).abs() < 1e-6);
         assert!((data[1] - (-2.0)).abs() < 1e-6);
@@ -2868,8 +2859,8 @@ mod tests {
 
     #[test]
     fn mlp_compute_hidden_dim() {
-        let dim_1536 = super::Mlp::<burn::backend::ndarray::NdArray<f32>>::compute_hidden_dim(1536);
-        let dim_3072 = super::Mlp::<burn::backend::ndarray::NdArray<f32>>::compute_hidden_dim(3072);
+        let dim_1536 = super::Mlp::compute_hidden_dim(1536);
+        let dim_3072 = super::Mlp::compute_hidden_dim(3072);
 
         assert_eq!(dim_1536, 4096);
 
@@ -2878,26 +2869,19 @@ mod tests {
 
     #[test]
     fn rms_norm_forward_preserves_shape() {
-        use burn::backend::ndarray::NdArray;
+        let device = burn::tensor::Device::flex();
+        let rms_norm = super::RmsNorm::new(&device, 16, 1e-6);
 
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let rms_norm = super::RmsNorm::<NdArray<f32>>::new(&device, 16, 1e-6);
-
-        let input = Tensor::<NdArray<f32>, 3>::from_data(
-            TensorData::new(vec![1.0; 128], [2, 4, 16]),
-            &device,
-        );
+        let input = Tensor::<3>::from_data(TensorData::new(vec![1.0; 128], [2, 4, 16]), &device);
         let output = rms_norm.forward(input);
         assert_eq!(output.dims(), [2, 4, 16]);
     }
 
     #[test]
     fn heartcodec_model_new_creates_valid_model() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
+        let device = burn::tensor::Device::flex();
         let config = super::HeartCodecConfig::default();
-        let model = super::HeartCodecModel::<NdArray<f32>>::new(&device);
+        let model = super::HeartCodecModel::new(&device);
 
         assert_eq!(model.ode_steps, config.ode_steps);
         assert_eq!(model.guidance_scale, 1.0);
@@ -2905,43 +2889,35 @@ mod tests {
 
     #[test]
     fn heartcodec_model_with_ode_steps() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let model = super::HeartCodecModel::<NdArray<f32>>::new(&device).with_ode_steps(20);
+        let device = burn::tensor::Device::flex();
+        let model = super::HeartCodecModel::new(&device).with_ode_steps(20);
 
         assert_eq!(model.ode_steps, 20);
     }
 
     #[test]
     fn heartcodec_model_with_guidance_scale() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let model = super::HeartCodecModel::<NdArray<f32>>::new(&device).with_guidance_scale(2.5);
+        let device = burn::tensor::Device::flex();
+        let model = super::HeartCodecModel::new(&device).with_guidance_scale(2.5);
 
         assert_eq!(model.guidance_scale, 2.5);
     }
 
     #[test]
     fn heartcodec_model_clamps_ode_steps() {
-        use burn::backend::ndarray::NdArray;
+        let device = burn::tensor::Device::flex();
 
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-
-        let model_high = super::HeartCodecModel::<NdArray<f32>>::new(&device).with_ode_steps(100);
+        let model_high = super::HeartCodecModel::new(&device).with_ode_steps(100);
         assert_eq!(model_high.ode_steps, 50);
 
-        let model_low = super::HeartCodecModel::<NdArray<f32>>::new(&device).with_ode_steps(0);
+        let model_low = super::HeartCodecModel::new(&device).with_ode_steps(0);
         assert_eq!(model_low.ode_steps, 1);
     }
 
     #[test]
     fn residual_unit_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let unit = super::ResidualUnit::<NdArray<f32>>::new(&device, 128, 3);
+        let device = burn::tensor::Device::flex();
+        let unit = super::ResidualUnit::new(&device, 128, 3);
 
         assert_eq!(unit.conv1.dilation, 3);
         assert_eq!(unit.conv2.dilation, 1);
@@ -2949,10 +2925,8 @@ mod tests {
 
     #[test]
     fn resdecoder_block_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let block = super::ResDecoderBlock::<NdArray<f32>>::new(&device, 2048, 1024);
+        let device = burn::tensor::Device::flex();
+        let block = super::ResDecoderBlock::new(&device, 2048, 1024);
 
         assert_eq!(block.up_conv.stride, 5);
         assert_eq!(block.convs.len(), 5);
@@ -2960,9 +2934,7 @@ mod tests {
 
     #[test]
     fn resdecoder_block_kernel_stride_pairs() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
+        let device = burn::tensor::Device::flex();
 
         let test_cases = [
             ((2048, 1024), (10, 5)),
@@ -2974,7 +2946,7 @@ mod tests {
         ];
 
         for ((in_ch, out_ch), (_expected_k, expected_s)) in test_cases {
-            let block = super::ResDecoderBlock::<NdArray<f32>>::new(&device, in_ch, out_ch);
+            let block = super::ResDecoderBlock::new(&device, in_ch, out_ch);
             assert_eq!(
                 block.up_conv.stride, expected_s,
                 "stride mismatch for ({}, {})",
@@ -2985,10 +2957,8 @@ mod tests {
 
     #[test]
     fn project_layer_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let proj = super::ProjectLayer::<NdArray<f32>>::new(&device, 512, 256, 3);
+        let device = burn::tensor::Device::flex();
+        let proj = super::ProjectLayer::new(&device, 512, 256, 3);
 
         assert_eq!(proj.kernel_size, 3);
         assert_eq!(proj.out_channels, 256);
@@ -2996,11 +2966,9 @@ mod tests {
 
     #[test]
     fn scalar_model_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
+        let device = burn::tensor::Device::flex();
         let config = super::HeartCodecConfig::default();
-        let model = super::ScalarModel::<NdArray<f32>>::new(&device, &config);
+        let model = super::ScalarModel::new(&device, &config);
 
         assert_eq!(model.decoder_0.kernel_size(), 5);
         assert_eq!(model.decoder_7.kernel_size(), 7);
@@ -3008,37 +2976,28 @@ mod tests {
 
     #[test]
     fn interpolate_1d_scale_factor_1() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let input = Tensor::<NdArray<f32>, 3>::from_data(
+        let device = burn::tensor::Device::flex();
+        let input = Tensor::<3>::from_data(
             TensorData::new(vec![1.0, 2.0, 3.0, 4.0], [1, 2, 2]),
             &device,
         );
 
-        let output = super::FlowMatching::<NdArray<f32>>::interpolate_1d(&input, 1);
+        let output = super::FlowMatching::interpolate_1d(&input, 1);
         assert_eq!(output.dims(), input.dims());
     }
 
     #[test]
     fn interpolate_1d_scale_factor_2() {
-        use burn::backend::ndarray::NdArray;
+        let device = burn::tensor::Device::flex();
+        let input = Tensor::<3>::from_data(TensorData::new(vec![1.0, 2.0], [1, 1, 2]), &device);
 
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let input = Tensor::<NdArray<f32>, 3>::from_data(
-            TensorData::new(vec![1.0, 2.0], [1, 1, 2]),
-            &device,
-        );
-
-        let output = super::FlowMatching::<NdArray<f32>>::interpolate_1d(&input, 2);
+        let output = super::FlowMatching::interpolate_1d(&input, 2);
         assert_eq!(output.dims(), [1, 2, 2]);
     }
 
     #[test]
     fn build_latent_masks_basic() {
-        let masks = super::FlowMatching::<burn::backend::ndarray::NdArray<f32>>::build_latent_masks(
-            10, 8, 5,
-        );
+        let masks = super::FlowMatching::build_latent_masks(10, 8, 5);
 
         assert_eq!(masks.len(), 10);
 
@@ -3054,9 +3013,7 @@ mod tests {
 
     #[test]
     fn build_latent_masks_incontext_larger_than_seq() {
-        let masks = super::FlowMatching::<burn::backend::ndarray::NdArray<f32>>::build_latent_masks(
-            5, 10, 10,
-        );
+        let masks = super::FlowMatching::build_latent_masks(5, 10, 10);
 
         assert_eq!(masks.len(), 5);
 
@@ -3067,10 +3024,8 @@ mod tests {
 
     #[test]
     fn transformer_block_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let block = super::TransformerBlock::<NdArray<f32>>::new(&device, 512, 8, 64);
+        let device = burn::tensor::Device::flex();
+        let block = super::TransformerBlock::new(&device, 512, 8, 64);
 
         assert_eq!(block.attn.num_heads, 8);
         assert_eq!(block.attn.head_dim, 64);
@@ -3078,10 +3033,8 @@ mod tests {
 
     #[test]
     fn attention_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let attn = super::Attention::<NdArray<f32>>::new(&device, 512, 8, 64);
+        let device = burn::tensor::Device::flex();
+        let attn = super::Attention::new(&device, 512, 8, 64);
 
         assert_eq!(attn.num_heads, 8);
         assert_eq!(attn.head_dim, 64);
@@ -3090,11 +3043,9 @@ mod tests {
 
     #[test]
     fn llama_transformer_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
+        let device = burn::tensor::Device::flex();
         let config = super::HeartCodecConfig::default();
-        let transformer = super::LlamaTransformer::<NdArray<f32>>::new(&device, &config);
+        let transformer = super::LlamaTransformer::new(&device, &config);
 
         assert_eq!(transformer.transformer_blocks.len(), 24);
         assert_eq!(transformer.transformer_blocks_2.len(), 6);
@@ -3102,10 +3053,8 @@ mod tests {
 
     #[test]
     fn adalayer_norm_single_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let adaln = super::AdaLayerNormSingle::<NdArray<f32>>::new(&device, 512);
+        let device = burn::tensor::Device::flex();
+        let adaln = super::AdaLayerNormSingle::new(&device, 512);
 
         let (output, embedded) = adaln.forward(0.5, burn::tensor::DType::F32);
         assert_eq!(output.dims(), [1, 6, 512]);
@@ -3114,22 +3063,18 @@ mod tests {
 
     #[test]
     fn timestep_embedding_new() {
-        use burn::backend::ndarray::NdArray;
+        let device = burn::tensor::Device::flex();
+        let emb = super::TimestepEmbedding::new(&device, 128, 512);
 
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let emb = super::TimestepEmbedding::<NdArray<f32>>::new(&device, 128, 512);
-
-        let input = Tensor::<NdArray<f32>, 2>::zeros([1, 128], &device);
+        let input = Tensor::<2>::zeros([1, 128], &device);
         let output = emb.forward(input);
         assert_eq!(output.dims(), [1, 512]);
     }
 
     #[test]
     fn pixart_alpha_combined_flow_embeddings() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let emb = super::PixArtAlphaCombinedFlowEmbeddings::<NdArray<f32>>::new(&device, 512);
+        let device = burn::tensor::Device::flex();
+        let emb = super::PixArtAlphaCombinedFlowEmbeddings::new(&device, 512);
 
         let output = emb.forward(0.5, burn::tensor::DType::F32);
         assert_eq!(output.dims(), [1, 512]);
@@ -3137,10 +3082,8 @@ mod tests {
 
     #[test]
     fn vq_codebook_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
-        let codebook = super::VQCodebook::<NdArray<f32>>::new(&device, 1024, 64);
+        let device = burn::tensor::Device::flex();
+        let codebook = super::VQCodebook::new(&device, 1024, 64);
 
         assert_eq!(codebook._codebook.embed.val().dims()[0], 1);
         assert_eq!(codebook._codebook.embed.val().dims()[1], 1024);
@@ -3149,11 +3092,9 @@ mod tests {
 
     #[test]
     fn residual_vq_new() {
-        use burn::backend::ndarray::NdArray;
-
-        let device = burn::prelude::Device::<NdArray<f32>>::default();
+        let device = burn::tensor::Device::flex();
         let config = super::HeartCodecConfig::default();
-        let rvq = super::ResidualVQ::<NdArray<f32>>::new(&device, &config);
+        let rvq = super::ResidualVQ::new(&device, &config);
 
         assert_eq!(rvq.layers.len(), 8);
     }

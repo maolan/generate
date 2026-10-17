@@ -20,7 +20,6 @@
 use anyhow::{Context, Result};
 use burn::module::{Module, Param};
 use burn::nn::{Embedding, EmbeddingConfig, Linear, LinearConfig, LinearLayout};
-use burn::prelude::Backend;
 use burn::tensor::activation::{silu, softmax};
 use burn::tensor::{Bool, DType, Tensor, TensorData};
 use burn_store::{BurnpackStore, ModuleSnapshot};
@@ -78,20 +77,20 @@ impl Qwen3Config {
 }
 
 #[derive(Module, Debug)]
-pub struct Qwen3RmsNorm<B: Backend> {
-    pub weight: Param<Tensor<B, 1>>,
+pub struct Qwen3RmsNorm {
+    pub weight: Param<Tensor<1>>,
     pub epsilon: f64,
 }
 
-impl<B: Backend> Qwen3RmsNorm<B> {
-    pub fn new(device: &B::Device, hidden_size: usize, epsilon: f64) -> Self {
+impl Qwen3RmsNorm {
+    pub fn new(device: &burn::tensor::Device, hidden_size: usize, epsilon: f64) -> Self {
         Self {
-            weight: Param::from_tensor(Tensor::<B, 1>::ones([hidden_size], device)),
+            weight: Param::from_tensor(Tensor::<1>::ones([hidden_size], device)),
             epsilon,
         }
     }
 
-    pub fn forward<const D: usize>(&self, hidden: Tensor<B, D>) -> Tensor<B, D> {
+    pub fn forward<const D: usize>(&self, hidden: Tensor<D>) -> Tensor<D> {
         let dtype = hidden.dtype();
         let rms = (hidden.clone().cast(DType::F32).square().mean_dim(D - 1) + self.epsilon).sqrt();
         (hidden / rms.cast(dtype)) * self.weight.val().unsqueeze()
@@ -99,13 +98,13 @@ impl<B: Backend> Qwen3RmsNorm<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct Qwen3Attention<B: Backend> {
-    pub q_proj: Linear<B>,
-    pub k_proj: Linear<B>,
-    pub v_proj: Linear<B>,
-    pub o_proj: Linear<B>,
-    pub q_norm: Qwen3RmsNorm<B>,
-    pub k_norm: Qwen3RmsNorm<B>,
+pub struct Qwen3Attention {
+    pub q_proj: Linear,
+    pub k_proj: Linear,
+    pub v_proj: Linear,
+    pub o_proj: Linear,
+    pub q_norm: Qwen3RmsNorm,
+    pub k_norm: Qwen3RmsNorm,
     #[module(skip)]
     meta: AttentionMeta,
 }
@@ -118,8 +117,8 @@ struct AttentionMeta {
     scaling: f32,
 }
 
-impl<B: Backend> Qwen3Attention<B> {
-    pub fn new(config: &Qwen3Config, device: &B::Device) -> Self {
+impl Qwen3Attention {
+    pub fn new(config: &Qwen3Config, device: &burn::tensor::Device) -> Self {
         let head_dim = config.head_dim();
         Self {
             q_proj: linear_no_bias(
@@ -155,11 +154,11 @@ impl<B: Backend> Qwen3Attention<B> {
 
     pub fn forward(
         &self,
-        hidden: Tensor<B, 3>,
+        hidden: Tensor<3>,
         causal: bool,
-        cos: &Tensor<B, 4>,
-        sin: &Tensor<B, 4>,
-    ) -> Tensor<B, 3> {
+        cos: &Tensor<4>,
+        sin: &Tensor<4>,
+    ) -> Tensor<3> {
         let [batch, seq_len, _] = hidden.dims();
         let num_heads = self.meta.num_heads;
         let num_kv_heads = self.meta.num_kv_heads;
@@ -195,7 +194,7 @@ impl<B: Backend> Qwen3Attention<B> {
 
         let scores = q.matmul(k.swap_dims(2, 3)).mul_scalar(self.meta.scaling);
         let scores = if causal {
-            let mask = causal_mask::<B>(seq_len, &scores.device());
+            let mask = causal_mask(seq_len, &scores.device());
             scores.mask_fill(mask, -1.0e9)
         } else {
             scores
@@ -215,12 +214,12 @@ impl<B: Backend> Qwen3Attention<B> {
     /// `position_offset` is the absolute position of the first new token.
     pub fn forward_cached(
         &self,
-        hidden: Tensor<B, 3>,
-        cache: &mut Qwen3AttentionCache<B>,
-        cos: &Tensor<B, 4>,
-        sin: &Tensor<B, 4>,
+        hidden: Tensor<3>,
+        cache: &mut Qwen3AttentionCache,
+        cos: &Tensor<4>,
+        sin: &Tensor<4>,
         position_offset: usize,
-    ) -> Tensor<B, 3> {
+    ) -> Tensor<3> {
         let [batch, seq_len, _] = hidden.dims();
         let num_heads = self.meta.num_heads;
         let num_kv_heads = self.meta.num_kv_heads;
@@ -269,7 +268,7 @@ impl<B: Backend> Qwen3Attention<B> {
         let scores = q.matmul(k.swap_dims(2, 3)).mul_scalar(self.meta.scaling);
         // New query row r sits at absolute position `position_offset + r` and
         // may attend to every cached key up to and including itself.
-        let mask = incremental_causal_mask::<B>(seq_len, kv_len, position_offset, &scores.device());
+        let mask = incremental_causal_mask(seq_len, kv_len, position_offset, &scores.device());
         let scores = scores.mask_fill(mask, -1.0e9);
         let weights = softmax(scores, 3);
         let attended =
@@ -282,14 +281,14 @@ impl<B: Backend> Qwen3Attention<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct Qwen3Mlp<B: Backend> {
-    pub gate_proj: Linear<B>,
-    pub up_proj: Linear<B>,
-    pub down_proj: Linear<B>,
+pub struct Qwen3Mlp {
+    pub gate_proj: Linear,
+    pub up_proj: Linear,
+    pub down_proj: Linear,
 }
 
-impl<B: Backend> Qwen3Mlp<B> {
-    pub fn new(config: &Qwen3Config, device: &B::Device) -> Self {
+impl Qwen3Mlp {
+    pub fn new(config: &Qwen3Config, device: &burn::tensor::Device) -> Self {
         Self {
             gate_proj: linear_no_bias(device, config.hidden_size, config.intermediate_size),
             up_proj: linear_no_bias(device, config.hidden_size, config.intermediate_size),
@@ -297,7 +296,7 @@ impl<B: Backend> Qwen3Mlp<B> {
         }
     }
 
-    pub fn forward(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, hidden: Tensor<3>) -> Tensor<3> {
         let gate = silu(self.gate_proj.forward(hidden.clone()));
         let up = self.up_proj.forward(hidden);
         self.down_proj.forward(gate * up)
@@ -309,12 +308,12 @@ impl<B: Backend> Qwen3Mlp<B> {
 /// Tensors are stored post-RoPE as `[batch, num_kv_heads, seq, head_dim]`
 /// (before grouped-query expansion).
 #[derive(Clone, Debug)]
-pub struct Qwen3AttentionCache<B: Backend> {
-    pub key: Option<Tensor<B, 4>>,
-    pub value: Option<Tensor<B, 4>>,
+pub struct Qwen3AttentionCache {
+    pub key: Option<Tensor<4>>,
+    pub value: Option<Tensor<4>>,
 }
 
-impl<B: Backend> Qwen3AttentionCache<B> {
+impl Qwen3AttentionCache {
     fn empty() -> Self {
         Self {
             key: None,
@@ -325,20 +324,20 @@ impl<B: Backend> Qwen3AttentionCache<B> {
 
 /// Whole-model KV cache, one entry per decoder layer.
 #[derive(Clone, Debug)]
-pub struct Qwen3KvCache<B: Backend> {
-    pub layers: Vec<Qwen3AttentionCache<B>>,
+pub struct Qwen3KvCache {
+    pub layers: Vec<Qwen3AttentionCache>,
 }
 
 #[derive(Module, Debug)]
-pub struct Qwen3DecoderLayer<B: Backend> {
-    pub self_attn: Qwen3Attention<B>,
-    pub mlp: Qwen3Mlp<B>,
-    pub input_layernorm: Qwen3RmsNorm<B>,
-    pub post_attention_layernorm: Qwen3RmsNorm<B>,
+pub struct Qwen3DecoderLayer {
+    pub self_attn: Qwen3Attention,
+    pub mlp: Qwen3Mlp,
+    pub input_layernorm: Qwen3RmsNorm,
+    pub post_attention_layernorm: Qwen3RmsNorm,
 }
 
-impl<B: Backend> Qwen3DecoderLayer<B> {
-    pub fn new(config: &Qwen3Config, device: &B::Device) -> Self {
+impl Qwen3DecoderLayer {
+    pub fn new(config: &Qwen3Config, device: &burn::tensor::Device) -> Self {
         Self {
             self_attn: Qwen3Attention::new(config, device),
             mlp: Qwen3Mlp::new(config, device),
@@ -353,11 +352,11 @@ impl<B: Backend> Qwen3DecoderLayer<B> {
 
     pub fn forward(
         &self,
-        hidden: Tensor<B, 3>,
+        hidden: Tensor<3>,
         causal: bool,
-        cos: &Tensor<B, 4>,
-        sin: &Tensor<B, 4>,
-    ) -> Tensor<B, 3> {
+        cos: &Tensor<4>,
+        sin: &Tensor<4>,
+    ) -> Tensor<3> {
         let residual = hidden.clone();
         let normed = self.input_layernorm.forward(hidden);
         let hidden = residual + self.self_attn.forward(normed, causal, cos, sin);
@@ -369,12 +368,12 @@ impl<B: Backend> Qwen3DecoderLayer<B> {
 
     pub fn forward_cached(
         &self,
-        hidden: Tensor<B, 3>,
-        cache: &mut Qwen3AttentionCache<B>,
-        cos: &Tensor<B, 4>,
-        sin: &Tensor<B, 4>,
+        hidden: Tensor<3>,
+        cache: &mut Qwen3AttentionCache,
+        cos: &Tensor<4>,
+        sin: &Tensor<4>,
         position_offset: usize,
-    ) -> Tensor<B, 3> {
+    ) -> Tensor<3> {
         let residual = hidden.clone();
         let normed = self.input_layernorm.forward(hidden);
         let hidden = residual
@@ -389,16 +388,16 @@ impl<B: Backend> Qwen3DecoderLayer<B> {
 }
 
 #[derive(Module, Debug)]
-pub struct Qwen3Model<B: Backend> {
-    pub embed_tokens: Embedding<B>,
-    pub layers: Vec<Qwen3DecoderLayer<B>>,
-    pub norm: Qwen3RmsNorm<B>,
+pub struct Qwen3Model {
+    pub embed_tokens: Embedding,
+    pub layers: Vec<Qwen3DecoderLayer>,
+    pub norm: Qwen3RmsNorm,
     head_dim: usize,
     rope_theta: f64,
 }
 
-impl<B: Backend> Qwen3Model<B> {
-    pub fn new(config: &Qwen3Config, device: &B::Device) -> Self {
+impl Qwen3Model {
+    pub fn new(config: &Qwen3Config, device: &burn::tensor::Device) -> Self {
         Self {
             embed_tokens: EmbeddingConfig::new(config.vocab_size, config.hidden_size).init(device),
             layers: (0..config.num_hidden_layers)
@@ -410,23 +409,23 @@ impl<B: Backend> Qwen3Model<B> {
         }
     }
 
-    pub fn from_burnpack(config: &Qwen3Config, path: &Path, device: &B::Device) -> Result<Self> {
+    pub fn from_burnpack(
+        config: &Qwen3Config,
+        path: &Path,
+        device: &burn::tensor::Device,
+    ) -> Result<Self> {
         let mut model = Self::new(config, device);
-        let mut store = BurnpackStore::from_file(path).zero_copy(true);
+        let mut store = BurnpackStore::from_file(path);
         model
             .load_from(&mut store)
             .with_context(|| format!("failed to load Qwen3 weights from {}", path.display()))?;
         Ok(model)
     }
 
-    pub fn forward(
-        &self,
-        input_ids: Tensor<B, 2, burn::tensor::Int>,
-        causal: bool,
-    ) -> Tensor<B, 3> {
+    pub fn forward(&self, input_ids: Tensor<2, burn::tensor::Int>, causal: bool) -> Tensor<3> {
         let [_, seq_len] = input_ids.dims();
         let device = input_ids.device();
-        let (cos, sin) = rotary_cos_sin::<B>(seq_len, self.head_dim, self.rope_theta, &device);
+        let (cos, sin) = rotary_cos_sin(seq_len, self.head_dim, self.rope_theta, &device);
 
         let mut hidden = self.embed_tokens.forward(input_ids);
         for layer in &self.layers {
@@ -436,7 +435,7 @@ impl<B: Backend> Qwen3Model<B> {
     }
 
     /// Fresh KV cache sized to the model's layer count.
-    pub fn new_cache(&self) -> Qwen3KvCache<B> {
+    pub fn new_cache(&self) -> Qwen3KvCache {
         Qwen3KvCache {
             layers: (0..self.layers.len())
                 .map(|_| Qwen3AttentionCache::empty())
@@ -451,13 +450,13 @@ impl<B: Backend> Qwen3Model<B> {
     /// tokens, matching `forward(.., causal = true)`.
     pub fn forward_cached(
         &self,
-        token_ids: Tensor<B, 2, burn::tensor::Int>,
-        cache: &mut Qwen3KvCache<B>,
+        token_ids: Tensor<2, burn::tensor::Int>,
+        cache: &mut Qwen3KvCache,
         position_offset: usize,
-    ) -> Tensor<B, 3> {
+    ) -> Tensor<3> {
         let [_, seq_len] = token_ids.dims();
         let device = token_ids.device();
-        let (cos, sin) = rotary_cos_sin_at::<B>(
+        let (cos, sin) = rotary_cos_sin_at(
             seq_len,
             position_offset,
             self.head_dim,
@@ -475,7 +474,7 @@ impl<B: Backend> Qwen3Model<B> {
     /// Tied lm_head weight (`tie_word_embeddings = true`): the
     /// `[vocab_size, hidden_size]` embedding table. Logits for a hidden state
     /// are `hidden @ weight.swap_dims(0, 1)`.
-    pub fn embedding_weight(&self) -> Tensor<B, 2> {
+    pub fn embedding_weight(&self) -> Tensor<2> {
         self.embed_tokens.weight.val()
     }
 }
@@ -483,24 +482,24 @@ impl<B: Backend> Qwen3Model<B> {
 /// inv_freq[i] = 1 / theta^(2i / head_dim); cos/sin over positions 0..seq_len
 /// with duplicated halves (cat([freqs, freqs])). Returned as [1, L, 1, head_dim]
 /// so they broadcast against [batch, seq, heads, head_dim].
-fn rotary_cos_sin<B: Backend>(
+fn rotary_cos_sin(
     seq_len: usize,
     head_dim: usize,
     theta: f64,
-    device: &B::Device,
-) -> (Tensor<B, 4>, Tensor<B, 4>) {
-    rotary_cos_sin_at::<B>(seq_len, 0, head_dim, theta, device)
+    device: &burn::tensor::Device,
+) -> (Tensor<4>, Tensor<4>) {
+    rotary_cos_sin_at(seq_len, 0, head_dim, theta, device)
 }
 
 /// Same as [`rotary_cos_sin`] but over absolute positions
 /// `offset..offset + seq_len` (used by the KV-cache incremental path).
-fn rotary_cos_sin_at<B: Backend>(
+fn rotary_cos_sin_at(
     seq_len: usize,
     offset: usize,
     head_dim: usize,
     theta: f64,
-    device: &B::Device,
-) -> (Tensor<B, 4>, Tensor<B, 4>) {
+    device: &burn::tensor::Device,
+) -> (Tensor<4>, Tensor<4>) {
     let half = head_dim / 2;
     let inv_freq: Vec<f32> = (0..half)
         .map(|i| 1.0 / theta.powf(2.0 * i as f64 / head_dim as f64) as f32)
@@ -518,12 +517,12 @@ fn rotary_cos_sin_at<B: Backend>(
     }
     let shape = [1, seq_len, 1, head_dim];
     (
-        Tensor::<B, 4>::from_data(TensorData::new(cos_values, shape), device),
-        Tensor::<B, 4>::from_data(TensorData::new(sin_values, shape), device),
+        Tensor::<4>::from_data(TensorData::new(cos_values, shape), device),
+        Tensor::<4>::from_data(TensorData::new(sin_values, shape), device),
     )
 }
 
-fn rotate_half<B: Backend>(x: Tensor<B, 4>) -> Tensor<B, 4> {
+fn rotate_half(x: Tensor<4>) -> Tensor<4> {
     let [batch, seq_len, heads, head_dim] = x.dims();
     let half = head_dim / 2;
     let x1 = x.clone().slice([0..batch, 0..seq_len, 0..heads, 0..half]);
@@ -531,16 +530,13 @@ fn rotate_half<B: Backend>(x: Tensor<B, 4>) -> Tensor<B, 4> {
     Tensor::cat(vec![x2.neg(), x1], 3)
 }
 
-fn apply_rotary_pos_emb<B: Backend>(
-    x: Tensor<B, 4>,
-    cos: &Tensor<B, 4>,
-    sin: &Tensor<B, 4>,
-) -> Tensor<B, 4> {
-    x.clone() * cos.clone() + rotate_half(x) * sin.clone()
+fn apply_rotary_pos_emb(x: Tensor<4>, cos: &Tensor<4>, sin: &Tensor<4>) -> Tensor<4> {
+    let dtype = x.dtype();
+    x.clone() * cos.clone().cast(dtype) + rotate_half(x) * sin.clone().cast(dtype)
 }
 
 /// [batch, kv_heads, seq, head_dim] -> [batch, kv_heads * repeats, seq, head_dim]
-fn repeat_kv<B: Backend>(tensor: Tensor<B, 4>, repeats: usize) -> Tensor<B, 4> {
+fn repeat_kv(tensor: Tensor<4>, repeats: usize) -> Tensor<4> {
     let [batch, heads, seq_len, head_dim] = tensor.dims();
     tensor
         .unsqueeze_dim::<5>(2)
@@ -548,34 +544,34 @@ fn repeat_kv<B: Backend>(tensor: Tensor<B, 4>, repeats: usize) -> Tensor<B, 4> {
         .reshape([batch, heads * repeats, seq_len, head_dim])
 }
 
-fn causal_mask<B: Backend>(seq_len: usize, device: &B::Device) -> Tensor<B, 4, Bool> {
+fn causal_mask(seq_len: usize, device: &burn::tensor::Device) -> Tensor<4, Bool> {
     let mut mask = Vec::with_capacity(seq_len * seq_len);
     for row in 0..seq_len {
         for col in 0..seq_len {
             mask.push(col > row);
         }
     }
-    Tensor::<B, 4, Bool>::from_data(TensorData::new(mask, [1, 1, seq_len, seq_len]), device)
+    Tensor::<4, Bool>::from_data(TensorData::new(mask, [1, 1, seq_len, seq_len]), device)
 }
 
 /// Mask of shape [1, 1, query_len, key_len] for the KV-cache path: query row r
 /// (absolute position `offset + r`) may not attend to keys past itself.
-fn incremental_causal_mask<B: Backend>(
+fn incremental_causal_mask(
     query_len: usize,
     key_len: usize,
     offset: usize,
-    device: &B::Device,
-) -> Tensor<B, 4, Bool> {
+    device: &burn::tensor::Device,
+) -> Tensor<4, Bool> {
     let mut mask = Vec::with_capacity(query_len * key_len);
     for row in 0..query_len {
         for col in 0..key_len {
             mask.push(col > offset + row);
         }
     }
-    Tensor::<B, 4, Bool>::from_data(TensorData::new(mask, [1, 1, query_len, key_len]), device)
+    Tensor::<4, Bool>::from_data(TensorData::new(mask, [1, 1, query_len, key_len]), device)
 }
 
-fn linear_no_bias<B: Backend>(device: &B::Device, d_input: usize, d_output: usize) -> Linear<B> {
+fn linear_no_bias(device: &burn::tensor::Device, d_input: usize, d_output: usize) -> Linear {
     LinearConfig::new(d_input, d_output)
         .with_bias(false)
         .with_layout(LinearLayout::Col)
@@ -585,10 +581,8 @@ fn linear_no_bias<B: Backend>(device: &B::Device, d_input: usize, d_output: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::NdArray;
-    use burn::tensor::Int;
 
-    type TestBackend = NdArray<f32>;
+    use burn::tensor::Int;
 
     fn tiny_config() -> Qwen3Config {
         Qwen3Config {
@@ -606,15 +600,15 @@ mod tests {
         }
     }
 
-    fn tiny_model() -> Qwen3Model<TestBackend> {
-        let device = Default::default();
+    fn tiny_model() -> Qwen3Model {
+        let device = burn::tensor::Device::flex();
         Qwen3Model::new(&tiny_config(), &device)
     }
 
-    fn assert_finite(tensor: Tensor<TestBackend, 3>) {
+    fn assert_finite(tensor: Tensor<3>) {
         let values = tensor
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("output should materialize as f32");
         assert!(
             values.iter().all(|v| v.is_finite()),
@@ -625,8 +619,8 @@ mod tests {
     #[test]
     fn forward_causal_and_bidirectional_shapes() {
         let model = tiny_model();
-        let device = Default::default();
-        let input_ids = Tensor::<TestBackend, 2, Int>::from_data([[1, 2, 3, 4, 5]], &device);
+        let device = burn::tensor::Device::flex();
+        let input_ids = Tensor::<2, Int>::from_data([[1, 2, 3, 4, 5]], &device);
 
         let causal_out = model.forward(input_ids.clone(), true);
         assert_eq!(causal_out.dims(), [1, 5, 64]);
@@ -640,19 +634,19 @@ mod tests {
     #[test]
     fn causal_mask_changes_output() {
         let model = tiny_model();
-        let device = Default::default();
-        let input_ids = Tensor::<TestBackend, 2, Int>::from_data([[7, 8, 9, 10]], &device);
+        let device = burn::tensor::Device::flex();
+        let input_ids = Tensor::<2, Int>::from_data([[7, 8, 9, 10]], &device);
         let causal = model.forward(input_ids.clone(), true);
         let bidirectional = model.forward(input_ids, false);
         let causal_first = causal
             .slice([0..1, 0..1, 0..64])
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("causal slice");
         let bidirectional_first = bidirectional
             .slice([0..1, 0..1, 0..64])
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("bidirectional slice");
         // Position 0 attends to all tokens when bidirectional, only itself when causal.
         assert_ne!(causal_first, bidirectional_first);
@@ -660,21 +654,24 @@ mod tests {
 
     #[test]
     fn rotate_half_negates_and_swaps() {
-        let device = Default::default();
-        let x = Tensor::<TestBackend, 4>::from_data([[[[1.0, 2.0, 3.0, 4.0]]]], &device);
+        let device = burn::tensor::Device::flex();
+        let x = Tensor::<4>::from_data([[[[1.0, 2.0, 3.0, 4.0]]]], &device);
         let rotated = rotate_half(x);
-        let values = rotated.to_data().to_vec::<f32>().expect("rotated values");
+        let values = rotated
+            .to_data()
+            .try_to_vec::<f32>()
+            .expect("rotated values");
         assert_eq!(values, vec![-3.0, -4.0, 1.0, 2.0]);
     }
 
     #[test]
     fn rotary_cos_sin_shapes_and_origin() {
-        let device = Default::default();
-        let (cos, sin) = rotary_cos_sin::<TestBackend>(7, 16, 1_000_000.0, &device);
+        let device = burn::tensor::Device::flex();
+        let (cos, sin) = rotary_cos_sin(7, 16, 1_000_000.0, &device);
         assert_eq!(cos.dims(), [1, 7, 1, 16]);
         assert_eq!(sin.dims(), [1, 7, 1, 16]);
-        let cos_values = cos.to_data().to_vec::<f32>().expect("cos values");
-        let sin_values = sin.to_data().to_vec::<f32>().expect("sin values");
+        let cos_values = cos.to_data().try_to_vec::<f32>().expect("cos values");
+        let sin_values = sin.to_data().try_to_vec::<f32>().expect("sin values");
         // Position 0: cos == 1, sin == 0 for every frequency.
         assert!(cos_values[..16].iter().all(|v| (*v - 1.0).abs() < 1e-6));
         assert!(sin_values[..16].iter().all(|v| v.abs() < 1e-6));
@@ -708,30 +705,27 @@ mod tests {
     #[test]
     fn forward_cached_matches_full_forward() {
         let model = tiny_model();
-        let device = Default::default();
+        let device = burn::tensor::Device::flex();
         let ids: [i64; 6] = [3, 5, 7, 11, 13, 17];
 
-        let full = model.forward(
-            Tensor::<TestBackend, 2, Int>::from_data([ids], &device),
-            true,
-        );
+        let full = model.forward(Tensor::<2, Int>::from_data([ids], &device), true);
         let expected_last = full
             .slice([0..1, 5..6, 0..64])
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("full forward last position");
 
         // Fully incremental: one token per step.
         let mut cache = model.new_cache();
-        let mut last: Option<Tensor<TestBackend, 3>> = None;
+        let mut last: Option<Tensor<3>> = None;
         for (pos, &tok) in ids.iter().enumerate() {
-            let step = Tensor::<TestBackend, 2, Int>::from_data([[tok]], &device);
+            let step = Tensor::<2, Int>::from_data([[tok]], &device);
             last = Some(model.forward_cached(step, &mut cache, pos));
         }
         let cached_last = last
             .expect("at least one step")
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("cached last position");
         for (a, b) in expected_last.iter().zip(cached_last.iter()) {
             assert!(
@@ -742,15 +736,15 @@ mod tests {
 
         // Prefill 4 tokens, then decode the remaining 2 one at a time.
         let mut cache = model.new_cache();
-        let prefill = Tensor::<TestBackend, 2, Int>::from_data([[3, 5, 7, 11]], &device);
+        let prefill = Tensor::<2, Int>::from_data([[3, 5, 7, 11]], &device);
         model.forward_cached(prefill, &mut cache, 0);
-        let step = Tensor::<TestBackend, 2, Int>::from_data([[13]], &device);
+        let step = Tensor::<2, Int>::from_data([[13]], &device);
         model.forward_cached(step, &mut cache, 4);
-        let step = Tensor::<TestBackend, 2, Int>::from_data([[17]], &device);
+        let step = Tensor::<2, Int>::from_data([[17]], &device);
         let decoded = model
             .forward_cached(step, &mut cache, 5)
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("prefill+decode last position");
         for (a, b) in expected_last.iter().zip(decoded.iter()) {
             assert!(

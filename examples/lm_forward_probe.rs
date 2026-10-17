@@ -8,17 +8,15 @@ use maolan_generate::acestep::lm::{self, AceStepLm, AudioCodeVocab, SamplingConf
 use maolan_generate::acestep::qwen3::{Qwen3Config, Qwen3Model};
 use std::path::Path;
 
-type B = burn::backend::NdArray<f32>;
-
 fn main() -> anyhow::Result<()> {
     let model_dir = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "/home/meka/repos/ace".to_string());
     let model_dir = Path::new(&model_dir);
-    let device = Default::default();
+    let device = burn::tensor::Device::flex();
 
     let config = Qwen3Config::load(&model_dir.join("lm_config.json"))?;
-    let lm = AceStepLm::<B>::from_burnpack(&config, &model_dir.join("acestep-lm.bpk"), &device)?;
+    let lm = AceStepLm::from_burnpack(&config, &model_dir.join("acestep-lm.bpk"), &device)?;
     let vocab = AudioCodeVocab::from_tokenizer_json(&model_dir.join("lm_tokenizer.json"))?;
 
     let cot = lm::build_cot_block(
@@ -33,10 +31,10 @@ fn main() -> anyhow::Result<()> {
     println!("prompt: {} tokens", ids.len());
 
     // One full forward; inspect logits at the last position.
-    let model: &Qwen3Model<B> = &lm.model;
+    let model: &Qwen3Model = &lm.model;
     let ids_i64: Vec<i64> = ids.iter().map(|&id| i64::from(id)).collect();
     let len = ids_i64.len();
-    let input = Tensor::<B, 2, Int>::from_data(TensorData::new(ids_i64, [1, len]), &device);
+    let input = Tensor::<2, Int>::from_data(TensorData::new(ids_i64, [1, len]), &device);
     let hidden = model.forward(input, true);
     let [_, _, hidden_dim] = hidden.dims();
     let last = hidden.narrow(1, len - 1, 1).reshape([1, hidden_dim]);
@@ -47,7 +45,7 @@ fn main() -> anyhow::Result<()> {
     let values: Vec<f32> = logits
         .into_data()
         .convert::<f32>()
-        .to_vec()
+        .try_to_vec()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut order: Vec<usize> = (0..values.len()).collect();
     order.sort_by(|&a, &b| values[b].total_cmp(&values[a]));
@@ -83,7 +81,7 @@ fn main() -> anyhow::Result<()> {
     for _ in 0..20 {
         let ids_i64: Vec<i64> = full_ids.iter().map(|&id| i64::from(id)).collect();
         let len = ids_i64.len();
-        let input = Tensor::<B, 2, Int>::from_data(TensorData::new(ids_i64, [1, len]), &device);
+        let input = Tensor::<2, Int>::from_data(TensorData::new(ids_i64, [1, len]), &device);
         let hidden = model.forward(input, true);
         let last = hidden.narrow(1, len - 1, 1).reshape([1, hidden_dim]);
         let logits = last
@@ -92,7 +90,7 @@ fn main() -> anyhow::Result<()> {
         let values: Vec<f32> = logits
             .into_data()
             .convert::<f32>()
-            .to_vec()
+            .try_to_vec()
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let next = values
             .iter()

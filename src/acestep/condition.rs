@@ -39,7 +39,6 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use burn::module::{Module, Param};
 use burn::nn::{Linear, LinearConfig, LinearLayout};
-use burn::prelude::Backend;
 use burn::tensor::activation::{silu, softmax};
 use burn::tensor::{DType, Int, Tensor, TensorData};
 use burn_store::{BurnpackStore, ModuleSnapshot};
@@ -50,20 +49,20 @@ use crate::acestep::fsq::ResidualFsq;
 /// Weight-only RMSNorm (Qwen3 style): `x * rsqrt(mean(x^2) + eps) * weight`,
 /// with the variance computed in fp32.
 #[derive(Module, Debug)]
-pub struct ConditionRmsNorm<B: Backend> {
-    pub weight: Param<Tensor<B, 1>>,
+pub struct ConditionRmsNorm {
+    pub weight: Param<Tensor<1>>,
     pub epsilon: f64,
 }
 
-impl<B: Backend> ConditionRmsNorm<B> {
-    pub fn new(device: &B::Device, hidden_size: usize, epsilon: f64) -> Self {
+impl ConditionRmsNorm {
+    pub fn new(device: &burn::tensor::Device, hidden_size: usize, epsilon: f64) -> Self {
         Self {
-            weight: Param::from_tensor(Tensor::<B, 1>::ones([hidden_size], device)),
+            weight: Param::from_tensor(Tensor::<1>::ones([hidden_size], device)),
             epsilon,
         }
     }
 
-    pub fn forward<const D: usize>(&self, hidden: Tensor<B, D>) -> Tensor<B, D> {
+    pub fn forward<const D: usize>(&self, hidden: Tensor<D>) -> Tensor<D> {
         let dtype = hidden.dtype();
         let rms = (hidden.clone().cast(DType::F32).square().mean_dim(D - 1) + self.epsilon).sqrt();
         (hidden / rms.cast(dtype)) * self.weight.val().unsqueeze()
@@ -83,19 +82,19 @@ struct AttentionMeta {
 
 /// Bidirectional self-attention with per-head q/k RMSNorm, post-norm RoPE and GQA.
 #[derive(Module, Debug)]
-pub struct AceStepAttention<B: Backend> {
-    pub q_proj: Linear<B>,
-    pub k_proj: Linear<B>,
-    pub v_proj: Linear<B>,
-    pub o_proj: Linear<B>,
-    pub q_norm: ConditionRmsNorm<B>,
-    pub k_norm: ConditionRmsNorm<B>,
+pub struct AceStepAttention {
+    pub q_proj: Linear,
+    pub k_proj: Linear,
+    pub v_proj: Linear,
+    pub o_proj: Linear,
+    pub q_norm: ConditionRmsNorm,
+    pub k_norm: ConditionRmsNorm,
     #[module(skip)]
     meta: AttentionMeta,
 }
 
-impl<B: Backend> AceStepAttention<B> {
-    pub fn new(config: &AceStepConfig, layer_idx: usize, device: &B::Device) -> Self {
+impl AceStepAttention {
+    pub fn new(config: &AceStepConfig, layer_idx: usize, device: &burn::tensor::Device) -> Self {
         let head_dim = config.head_dim;
         let sliding_window = config
             .is_sliding_layer(layer_idx)
@@ -138,11 +137,11 @@ impl<B: Backend> AceStepAttention<B> {
     /// negative value for disallowed query/key pairs.
     pub fn forward(
         &self,
-        hidden: Tensor<B, 3>,
-        cos: &Tensor<B, 4>,
-        sin: &Tensor<B, 4>,
-        additive_mask: Option<Tensor<B, 4>>,
-    ) -> Tensor<B, 3> {
+        hidden: Tensor<3>,
+        cos: &Tensor<4>,
+        sin: &Tensor<4>,
+        additive_mask: Option<Tensor<4>>,
+    ) -> Tensor<3> {
         let [batch, seq_len, _] = hidden.dims();
         let num_heads = self.meta.num_heads;
         let num_kv_heads = self.meta.num_kv_heads;
@@ -192,14 +191,14 @@ impl<B: Backend> AceStepAttention<B> {
 
 /// SwiGLU MLP: `down(silu(gate(x)) * up(x))`, no biases.
 #[derive(Module, Debug)]
-pub struct AceStepMlp<B: Backend> {
-    pub gate_proj: Linear<B>,
-    pub up_proj: Linear<B>,
-    pub down_proj: Linear<B>,
+pub struct AceStepMlp {
+    pub gate_proj: Linear,
+    pub up_proj: Linear,
+    pub down_proj: Linear,
 }
 
-impl<B: Backend> AceStepMlp<B> {
-    pub fn new(config: &AceStepConfig, device: &B::Device) -> Self {
+impl AceStepMlp {
+    pub fn new(config: &AceStepConfig, device: &burn::tensor::Device) -> Self {
         Self {
             gate_proj: linear_no_bias(device, config.hidden_size, config.intermediate_size),
             up_proj: linear_no_bias(device, config.hidden_size, config.intermediate_size),
@@ -207,7 +206,7 @@ impl<B: Backend> AceStepMlp<B> {
         }
     }
 
-    pub fn forward(&self, hidden: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, hidden: Tensor<3>) -> Tensor<3> {
         let gate = silu(self.gate_proj.forward(hidden.clone()));
         let up = self.up_proj.forward(hidden);
         self.down_proj.forward(gate * up)
@@ -218,15 +217,15 @@ impl<B: Backend> AceStepMlp<B> {
 /// encoder and detokenizer:
 /// `x += self_attn(input_layernorm(x)); x += mlp(post_attention_layernorm(x))`.
 #[derive(Module, Debug)]
-pub struct AceStepEncoderLayer<B: Backend> {
-    pub self_attn: AceStepAttention<B>,
-    pub mlp: AceStepMlp<B>,
-    pub input_layernorm: ConditionRmsNorm<B>,
-    pub post_attention_layernorm: ConditionRmsNorm<B>,
+pub struct AceStepEncoderLayer {
+    pub self_attn: AceStepAttention,
+    pub mlp: AceStepMlp,
+    pub input_layernorm: ConditionRmsNorm,
+    pub post_attention_layernorm: ConditionRmsNorm,
 }
 
-impl<B: Backend> AceStepEncoderLayer<B> {
-    pub fn new(config: &AceStepConfig, layer_idx: usize, device: &B::Device) -> Self {
+impl AceStepEncoderLayer {
+    pub fn new(config: &AceStepConfig, layer_idx: usize, device: &burn::tensor::Device) -> Self {
         Self {
             self_attn: AceStepAttention::new(config, layer_idx, device),
             mlp: AceStepMlp::new(config, device),
@@ -245,11 +244,11 @@ impl<B: Backend> AceStepEncoderLayer<B> {
     /// mask row (upstream has the same caveat).
     pub fn forward(
         &self,
-        hidden: Tensor<B, 3>,
-        cos: &Tensor<B, 4>,
-        sin: &Tensor<B, 4>,
-        padding_mask: Option<&Tensor<B, 2, Int>>,
-    ) -> Tensor<B, 3> {
+        hidden: Tensor<3>,
+        cos: &Tensor<4>,
+        sin: &Tensor<4>,
+        padding_mask: Option<&Tensor<2, Int>>,
+    ) -> Tensor<3> {
         let sliding_window = self.self_attn.meta.sliding_window;
         let additive_mask = if sliding_window.is_some() || padding_mask.is_some() {
             let [batch, seq_len, _] = hidden.dims();
@@ -258,10 +257,10 @@ impl<B: Backend> AceStepEncoderLayer<B> {
                 mask.clone()
                     .to_data()
                     .convert::<i64>()
-                    .to_vec::<i64>()
+                    .try_to_vec::<i64>()
                     .expect("padding mask must materialize as i64")
             });
-            Some(additive_attention_mask::<B>(
+            Some(additive_attention_mask(
                 batch,
                 seq_len,
                 sliding_window,
@@ -286,16 +285,16 @@ impl<B: Backend> AceStepEncoderLayer<B> {
 /// the model hidden size and runs `num_lyric_encoder_hidden_layers` encoder
 /// layers (bidirectional, alternating sliding/full, padding mask honored).
 #[derive(Module, Debug)]
-pub struct LyricEncoder<B: Backend> {
-    pub embed_tokens: Linear<B>,
-    pub layers: Vec<AceStepEncoderLayer<B>>,
-    pub norm: ConditionRmsNorm<B>,
+pub struct LyricEncoder {
+    pub embed_tokens: Linear,
+    pub layers: Vec<AceStepEncoderLayer>,
+    pub norm: ConditionRmsNorm,
     head_dim: usize,
     rope_theta: f64,
 }
 
-impl<B: Backend> LyricEncoder<B> {
-    pub fn new(config: &AceStepConfig, device: &B::Device) -> Self {
+impl LyricEncoder {
+    pub fn new(config: &AceStepConfig, device: &burn::tensor::Device) -> Self {
         Self {
             embed_tokens: linear_with_bias(device, config.text_hidden_dim, config.hidden_size),
             layers: (0..config.num_lyric_encoder_hidden_layers)
@@ -312,14 +311,10 @@ impl<B: Backend> LyricEncoder<B> {
     ///
     /// For instrumental tracks pass ONE dummy lyric token with mask [1]; an
     /// all-zero mask row produces NaN (all-masked softmax row), as upstream.
-    pub fn forward(
-        &self,
-        lyric_hidden_states: Tensor<B, 3>,
-        lyric_mask: Tensor<B, 2, Int>,
-    ) -> Tensor<B, 3> {
+    pub fn forward(&self, lyric_hidden_states: Tensor<3>, lyric_mask: Tensor<2, Int>) -> Tensor<3> {
         let [_, seq_len, _] = lyric_hidden_states.dims();
         let device = lyric_hidden_states.device();
-        let (cos, sin) = rotary_cos_sin::<B>(seq_len, self.head_dim, self.rope_theta, &device);
+        let (cos, sin) = rotary_cos_sin(seq_len, self.head_dim, self.rope_theta, &device);
 
         let mut hidden = self.embed_tokens.forward(lyric_hidden_states);
         for layer in &self.layers {
@@ -334,16 +329,16 @@ impl<B: Backend> LyricEncoder<B> {
 /// normed output. The checkpoint's `special_token` prepend is dead code
 /// upstream and is not modeled.
 #[derive(Module, Debug)]
-pub struct TimbreEncoder<B: Backend> {
-    pub embed_tokens: Linear<B>,
-    pub layers: Vec<AceStepEncoderLayer<B>>,
-    pub norm: ConditionRmsNorm<B>,
+pub struct TimbreEncoder {
+    pub embed_tokens: Linear,
+    pub layers: Vec<AceStepEncoderLayer>,
+    pub norm: ConditionRmsNorm,
     head_dim: usize,
     rope_theta: f64,
 }
 
-impl<B: Backend> TimbreEncoder<B> {
-    pub fn new(config: &AceStepConfig, device: &B::Device) -> Self {
+impl TimbreEncoder {
+    pub fn new(config: &AceStepConfig, device: &burn::tensor::Device) -> Self {
         Self {
             embed_tokens: linear_with_bias(
                 device,
@@ -362,10 +357,10 @@ impl<B: Backend> TimbreEncoder<B> {
     /// `refer_latents`: [B, timbre_fix_frame, audio_acoustic_hidden_dim] — one
     /// reference clip per batch item (VAE-encoded silence for text2music).
     /// Returns the pooled embedding [B, 1, hidden_size].
-    pub fn forward(&self, refer_latents: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, refer_latents: Tensor<3>) -> Tensor<3> {
         let [batch, seq_len, _] = refer_latents.dims();
         let device = refer_latents.device();
-        let (cos, sin) = rotary_cos_sin::<B>(seq_len, self.head_dim, self.rope_theta, &device);
+        let (cos, sin) = rotary_cos_sin(seq_len, self.head_dim, self.rope_theta, &device);
 
         let mut hidden = self.embed_tokens.forward(refer_latents);
         for layer in &self.layers {
@@ -382,23 +377,23 @@ impl<B: Backend> TimbreEncoder<B> {
 /// processed independently: embed → repeat 5× → add learned per-position
 /// `special_tokens` → 2 encoder layers → norm → project to the acoustic dim.
 #[derive(Module, Debug)]
-pub struct AudioTokenDetokenizer<B: Backend> {
-    pub embed_tokens: Linear<B>,
-    pub special_tokens: Param<Tensor<B, 3>>,
-    pub layers: Vec<AceStepEncoderLayer<B>>,
-    pub norm: ConditionRmsNorm<B>,
-    pub proj_out: Linear<B>,
+pub struct AudioTokenDetokenizer {
+    pub embed_tokens: Linear,
+    pub special_tokens: Param<Tensor<3>>,
+    pub layers: Vec<AceStepEncoderLayer>,
+    pub norm: ConditionRmsNorm,
+    pub proj_out: Linear,
     pool_window_size: usize,
     head_dim: usize,
     rope_theta: f64,
     acoustic_dim: usize,
 }
 
-impl<B: Backend> AudioTokenDetokenizer<B> {
-    pub fn new(config: &AceStepConfig, device: &B::Device) -> Self {
+impl AudioTokenDetokenizer {
+    pub fn new(config: &AceStepConfig, device: &burn::tensor::Device) -> Self {
         Self {
             embed_tokens: linear_with_bias(device, config.hidden_size, config.hidden_size),
-            special_tokens: Param::from_tensor(Tensor::<B, 3>::zeros(
+            special_tokens: Param::from_tensor(Tensor::<3>::zeros(
                 [1, config.pool_window_size, config.hidden_size],
                 device,
             )),
@@ -420,10 +415,10 @@ impl<B: Backend> AudioTokenDetokenizer<B> {
 
     /// `q`: [B, T5, hidden_size] (FSQ `project_out` output) →
     /// 25Hz hint latents [B, T5 * pool_window_size, audio_acoustic_hidden_dim].
-    pub fn forward(&self, q: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, q: Tensor<3>) -> Tensor<3> {
         let [batch, t5, _] = q.dims();
         let device = q.device();
-        let (cos, sin) = rotary_cos_sin::<B>(
+        let (cos, sin) = rotary_cos_sin(
             self.pool_window_size,
             self.head_dim,
             self.rope_theta,
@@ -445,7 +440,7 @@ impl<B: Backend> AudioTokenDetokenizer<B> {
 
     /// [B, T5, hidden] → [(B·T5), pool_window_size, hidden]: repeat each code
     /// 5× along a new axis and add the learned per-position special tokens.
-    fn expand_codes(&self, embedded: Tensor<B, 3>) -> Tensor<B, 3> {
+    fn expand_codes(&self, embedded: Tensor<3>) -> Tensor<3> {
         let [batch, t5, hidden_size] = embedded.dims();
         let repeated = embedded
             .unsqueeze_dim::<4>(2)
@@ -459,16 +454,16 @@ impl<B: Backend> AudioTokenDetokenizer<B> {
 /// timbre encoder, detokenizer and the FSQ quantizer (decode direction, used
 /// to turn 5Hz LM codes into continuous hints for the detokenizer).
 #[derive(Module, Debug)]
-pub struct AceStepCondition<B: Backend> {
-    pub text_projector: Linear<B>,
-    pub lyric_encoder: LyricEncoder<B>,
-    pub timbre_encoder: TimbreEncoder<B>,
-    pub detokenizer: AudioTokenDetokenizer<B>,
-    pub quantizer: ResidualFsq<B>,
+pub struct AceStepCondition {
+    pub text_projector: Linear,
+    pub lyric_encoder: LyricEncoder,
+    pub timbre_encoder: TimbreEncoder,
+    pub detokenizer: AudioTokenDetokenizer,
+    pub quantizer: ResidualFsq,
 }
 
-impl<B: Backend> AceStepCondition<B> {
-    pub fn new(config: &AceStepConfig, device: &B::Device) -> Self {
+impl AceStepCondition {
+    pub fn new(config: &AceStepConfig, device: &burn::tensor::Device) -> Self {
         Self {
             text_projector: linear_no_bias(device, config.text_hidden_dim, config.hidden_size),
             lyric_encoder: LyricEncoder::new(config, device),
@@ -480,9 +475,13 @@ impl<B: Backend> AceStepCondition<B> {
 
     /// Load weights from a burnpack file whose keys are the canonical tensor
     /// names documented at the top of this module.
-    pub fn from_burnpack(config: &AceStepConfig, path: &Path, device: &B::Device) -> Result<Self> {
+    pub fn from_burnpack(
+        config: &AceStepConfig,
+        path: &Path,
+        device: &burn::tensor::Device,
+    ) -> Result<Self> {
         let mut model = Self::new(config, device);
-        let mut store = BurnpackStore::from_file(path).zero_copy(true);
+        let mut store = BurnpackStore::from_file(path);
         model
             .load_from(&mut store)
             .with_context(|| format!("failed to load condition weights from {}", path.display()))?;
@@ -505,11 +504,11 @@ impl<B: Backend> AceStepCondition<B> {
     /// sequence, tail included.
     pub fn encode(
         &self,
-        text_hidden: Tensor<B, 3>,
-        lyric_hidden: Tensor<B, 3>,
-        lyric_mask: Tensor<B, 2, Int>,
-        silence_ref_latents: Tensor<B, 3>,
-    ) -> Tensor<B, 3> {
+        text_hidden: Tensor<3>,
+        lyric_hidden: Tensor<3>,
+        lyric_mask: Tensor<2, Int>,
+        silence_ref_latents: Tensor<3>,
+    ) -> Tensor<3> {
         let [batch, text_len, _] = text_hidden.dims();
         let device = text_hidden.device();
 
@@ -517,8 +516,8 @@ impl<B: Backend> AceStepCondition<B> {
         let timbre = self.timbre_encoder.forward(silence_ref_latents);
         let text = self.text_projector.forward(text_hidden);
 
-        let timbre_mask = Tensor::<B, 2, Int>::ones([batch, 1], &device);
-        let text_mask = Tensor::<B, 2, Int>::ones([batch, text_len], &device);
+        let timbre_mask = Tensor::<2, Int>::ones([batch, 1], &device);
+        let text_mask = Tensor::<2, Int>::ones([batch, text_len], &device);
 
         let (packed, mask) = pack_sequences(lyric, timbre, lyric_mask, timbre_mask);
         let (encoder_hidden_states, _final_mask) = pack_sequences(packed, text, mask, text_mask);
@@ -529,7 +528,7 @@ impl<B: Backend> AceStepCondition<B> {
     /// [B, T5 * pool_window_size, audio_acoustic_hidden_dim]
     /// (`quantizer.decode_indices` + detokenizer). These REPLACE `src_latents`
     /// in the DiT input when is_covers > 0.
-    pub fn codes_to_hints(&self, audio_codes: Tensor<B, 2, Int>) -> Tensor<B, 3> {
+    pub fn codes_to_hints(&self, audio_codes: Tensor<2, Int>) -> Tensor<3> {
         let hints = self.quantizer.decode_indices(audio_codes);
         self.detokenizer.forward(hints)
     }
@@ -542,12 +541,12 @@ impl<B: Backend> AceStepCondition<B> {
 ///
 /// Runs on the host (B is 1 in practice, and this is called twice per
 /// generation); the returned hidden states keep the input dtype.
-pub fn pack_sequences<B: Backend>(
-    hidden1: Tensor<B, 3>,
-    hidden2: Tensor<B, 3>,
-    mask1: Tensor<B, 2, Int>,
-    mask2: Tensor<B, 2, Int>,
-) -> (Tensor<B, 3>, Tensor<B, 2, Int>) {
+pub fn pack_sequences(
+    hidden1: Tensor<3>,
+    hidden2: Tensor<3>,
+    mask1: Tensor<2, Int>,
+    mask2: Tensor<2, Int>,
+) -> (Tensor<3>, Tensor<2, Int>) {
     let [batch, len1, dim] = hidden1.dims();
     let len2 = hidden2.dims()[1];
     let len = len1 + len2;
@@ -557,22 +556,22 @@ pub fn pack_sequences<B: Backend>(
     let hidden1_data = hidden1
         .to_data()
         .convert::<f32>()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .expect("hidden1 must materialize as f32");
     let hidden2_data = hidden2
         .to_data()
         .convert::<f32>()
-        .to_vec::<f32>()
+        .try_to_vec::<f32>()
         .expect("hidden2 must materialize as f32");
     let mask1_data = mask1
         .to_data()
         .convert::<i64>()
-        .to_vec::<i64>()
+        .try_to_vec::<i64>()
         .expect("mask1 must materialize as i64");
     let mask2_data = mask2
         .to_data()
         .convert::<i64>()
-        .to_vec::<i64>()
+        .try_to_vec::<i64>()
         .expect("mask2 must materialize as i64");
 
     let mut packed = vec![0.0f32; batch * len * dim];
@@ -602,21 +601,21 @@ pub fn pack_sequences<B: Backend>(
     }
 
     let packed =
-        Tensor::<B, 3>::from_data(TensorData::new(packed, [batch, len, dim]), &device).cast(dtype);
-    let new_mask = Tensor::<B, 2, Int>::from_data(TensorData::new(new_mask, [batch, len]), &device);
+        Tensor::<3>::from_data(TensorData::new(packed, [batch, len, dim]), &device).cast(dtype);
+    let new_mask = Tensor::<2, Int>::from_data(TensorData::new(new_mask, [batch, len]), &device);
     (packed, new_mask)
 }
 
 /// Additive [B, 1, L, L] attention mask: 0 where query i may attend to key j,
 /// `f32::MIN` elsewhere. A key is allowed when it is inside the sliding window
 /// (`|i - j| <= window`, if any) AND not padding.
-fn additive_attention_mask<B: Backend>(
+fn additive_attention_mask(
     batch: usize,
     seq_len: usize,
     sliding_window: Option<usize>,
     padding: Option<Vec<i64>>,
-    device: &B::Device,
-) -> Tensor<B, 4> {
+    device: &burn::tensor::Device,
+) -> Tensor<4> {
     let mut values = vec![f32::MIN; batch * seq_len * seq_len];
     for b in 0..batch {
         for i in 0..seq_len {
@@ -631,7 +630,7 @@ fn additive_attention_mask<B: Backend>(
             }
         }
     }
-    Tensor::<B, 4>::from_data(
+    Tensor::<4>::from_data(
         TensorData::new(values, [batch, 1, seq_len, seq_len]),
         device,
     )
@@ -640,12 +639,12 @@ fn additive_attention_mask<B: Backend>(
 /// inv_freq[i] = 1 / theta^(2i / head_dim); cos/sin over positions 0..seq_len
 /// with duplicated halves (cat([freqs, freqs])). Returned as [1, L, 1, head_dim]
 /// so they broadcast against [batch, seq, heads, head_dim].
-fn rotary_cos_sin<B: Backend>(
+fn rotary_cos_sin(
     seq_len: usize,
     head_dim: usize,
     theta: f64,
-    device: &B::Device,
-) -> (Tensor<B, 4>, Tensor<B, 4>) {
+    device: &burn::tensor::Device,
+) -> (Tensor<4>, Tensor<4>) {
     let half = head_dim / 2;
     let inv_freq: Vec<f32> = (0..half)
         .map(|i| 1.0 / theta.powf(2.0 * i as f64 / head_dim as f64) as f32)
@@ -663,12 +662,12 @@ fn rotary_cos_sin<B: Backend>(
     }
     let shape = [1, seq_len, 1, head_dim];
     (
-        Tensor::<B, 4>::from_data(TensorData::new(cos_values, shape), device),
-        Tensor::<B, 4>::from_data(TensorData::new(sin_values, shape), device),
+        Tensor::<4>::from_data(TensorData::new(cos_values, shape), device),
+        Tensor::<4>::from_data(TensorData::new(sin_values, shape), device),
     )
 }
 
-fn rotate_half<B: Backend>(x: Tensor<B, 4>) -> Tensor<B, 4> {
+fn rotate_half(x: Tensor<4>) -> Tensor<4> {
     let [batch, seq_len, heads, head_dim] = x.dims();
     let half = head_dim / 2;
     let x1 = x.clone().slice([0..batch, 0..seq_len, 0..heads, 0..half]);
@@ -676,16 +675,12 @@ fn rotate_half<B: Backend>(x: Tensor<B, 4>) -> Tensor<B, 4> {
     Tensor::cat(vec![x2.neg(), x1], 3)
 }
 
-fn apply_rotary_pos_emb<B: Backend>(
-    x: Tensor<B, 4>,
-    cos: &Tensor<B, 4>,
-    sin: &Tensor<B, 4>,
-) -> Tensor<B, 4> {
+fn apply_rotary_pos_emb(x: Tensor<4>, cos: &Tensor<4>, sin: &Tensor<4>) -> Tensor<4> {
     x.clone() * cos.clone() + rotate_half(x) * sin.clone()
 }
 
 /// [batch, kv_heads, seq, head_dim] -> [batch, kv_heads * repeats, seq, head_dim]
-fn repeat_kv<B: Backend>(tensor: Tensor<B, 4>, repeats: usize) -> Tensor<B, 4> {
+fn repeat_kv(tensor: Tensor<4>, repeats: usize) -> Tensor<4> {
     let [batch, heads, seq_len, head_dim] = tensor.dims();
     tensor
         .unsqueeze_dim::<5>(2)
@@ -693,14 +688,14 @@ fn repeat_kv<B: Backend>(tensor: Tensor<B, 4>, repeats: usize) -> Tensor<B, 4> {
         .reshape([batch, heads * repeats, seq_len, head_dim])
 }
 
-fn linear_no_bias<B: Backend>(device: &B::Device, d_input: usize, d_output: usize) -> Linear<B> {
+fn linear_no_bias(device: &burn::tensor::Device, d_input: usize, d_output: usize) -> Linear {
     LinearConfig::new(d_input, d_output)
         .with_bias(false)
         .with_layout(LinearLayout::Col)
         .init(device)
 }
 
-fn linear_with_bias<B: Backend>(device: &B::Device, d_input: usize, d_output: usize) -> Linear<B> {
+fn linear_with_bias(device: &burn::tensor::Device, d_input: usize, d_output: usize) -> Linear {
     LinearConfig::new(d_input, d_output)
         .with_layout(LinearLayout::Col)
         .init(device)
@@ -709,9 +704,6 @@ fn linear_with_bias<B: Backend>(device: &B::Device, d_input: usize, d_output: us
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::NdArray;
-
-    type TestBackend = NdArray<f32>;
 
     fn tiny_config() -> AceStepConfig {
         AceStepConfig {
@@ -744,10 +736,10 @@ mod tests {
         }
     }
 
-    fn assert_finite(tensor: Tensor<TestBackend, 3>) {
+    fn assert_finite(tensor: Tensor<3>) {
         let values = tensor
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("output should materialize as f32");
         assert!(
             values.iter().all(|v| v.is_finite()),
@@ -758,14 +750,14 @@ mod tests {
     #[test]
     fn encode_shapes_and_finiteness() {
         let config = tiny_config();
-        let device = Default::default();
-        let condition = AceStepCondition::<TestBackend>::new(&config, &device);
+        let device = burn::tensor::Device::flex();
+        let condition = AceStepCondition::new(&config, &device);
 
         let text_hidden =
             Tensor::from_data(TensorData::new(vec![0.01f32; 3 * 8], [1, 3, 8]), &device);
         let lyric_hidden =
             Tensor::from_data(TensorData::new(vec![-0.02f32; 2 * 8], [1, 2, 8]), &device);
-        let lyric_mask = Tensor::<TestBackend, 2, Int>::from_data([[1, 1]], &device);
+        let lyric_mask = Tensor::<2, Int>::from_data([[1, 1]], &device);
         let silence_ref_latents = Tensor::zeros([1, 750, 4], &device);
 
         let encoded = condition.encode(text_hidden, lyric_hidden, lyric_mask, silence_ref_latents);
@@ -776,21 +768,20 @@ mod tests {
 
     #[test]
     fn pack_sequences_stable_sorts_valid_first() {
-        let device = Default::default();
+        let device = burn::tensor::Device::flex();
         // Batch row 0: masks [1,0,1] + [0,1] -> order 10,30,50,20,40, mask 11100.
         // Batch row 1: masks [0,1,0] + [1,0] -> order 70,90,60,80,100, mask 11000.
-        let hidden1 = Tensor::<TestBackend, 3>::from_data(
+        let hidden1 = Tensor::<3>::from_data(
             [[[10.0], [20.0], [30.0]], [[60.0], [70.0], [80.0]]],
             &device,
         );
-        let hidden2 =
-            Tensor::<TestBackend, 3>::from_data([[[40.0], [50.0]], [[90.0], [100.0]]], &device);
-        let mask1 = Tensor::<TestBackend, 2, Int>::from_data([[1, 0, 1], [0, 1, 0]], &device);
-        let mask2 = Tensor::<TestBackend, 2, Int>::from_data([[0, 1], [1, 0]], &device);
+        let hidden2 = Tensor::<3>::from_data([[[40.0], [50.0]], [[90.0], [100.0]]], &device);
+        let mask1 = Tensor::<2, Int>::from_data([[1, 0, 1], [0, 1, 0]], &device);
+        let mask2 = Tensor::<2, Int>::from_data([[0, 1], [1, 0]], &device);
 
         let (packed, new_mask) = pack_sequences(hidden1, hidden2, mask1, mask2);
         assert_eq!(packed.dims(), [2, 5, 1]);
-        let packed_values = packed.to_data().to_vec::<f32>().expect("packed values");
+        let packed_values = packed.to_data().try_to_vec::<f32>().expect("packed values");
         assert_eq!(
             packed_values,
             vec![10.0, 30.0, 50.0, 20.0, 40.0, 70.0, 90.0, 60.0, 80.0, 100.0]
@@ -798,7 +789,7 @@ mod tests {
         let mask_values: Vec<i64> = new_mask
             .to_data()
             .convert::<i64>()
-            .to_vec::<i64>()
+            .try_to_vec::<i64>()
             .expect("mask values");
         assert_eq!(mask_values, vec![1, 1, 1, 0, 0, 1, 1, 0, 0, 0]);
     }
@@ -806,8 +797,8 @@ mod tests {
     #[test]
     fn codes_to_hints_shape_and_finiteness() {
         let config = tiny_config();
-        let device = Default::default();
-        let mut condition = AceStepCondition::<TestBackend>::new(&config, &device);
+        let device = burn::tensor::Device::flex();
+        let mut condition = AceStepCondition::new(&config, &device);
         // The real quantizer is fixed at 2048 dims (FSQ contract); swap in a
         // tiny project_out so the detokenizer sees the tiny hidden size.
         condition.quantizer = ResidualFsq {
@@ -815,7 +806,7 @@ mod tests {
             project_out: LinearConfig::new(6, 32).with_bias(true).init(&device),
         };
 
-        let codes = Tensor::<TestBackend, 2, Int>::from_data([[0, 63999]], &device);
+        let codes = Tensor::<2, Int>::from_data([[0, 63999]], &device);
         let hints = condition.codes_to_hints(codes);
         assert_eq!(hints.dims(), [1, 10, 4]);
         assert_finite(hints);
@@ -824,8 +815,8 @@ mod tests {
     #[test]
     fn detokenizer_expand_repeats_and_adds_special_tokens() {
         let config = tiny_config();
-        let device = Default::default();
-        let mut detokenizer = AudioTokenDetokenizer::<TestBackend>::new(&config, &device);
+        let device = burn::tensor::Device::flex();
+        let mut detokenizer = AudioTokenDetokenizer::new(&config, &device);
 
         // Known special tokens: special[0, p, h] = (p * 32 + h) * 0.001.
         let special: Vec<f32> = (0..5 * 32).map(|i| i as f32 * 0.001).collect();
@@ -835,13 +826,13 @@ mod tests {
         ));
 
         let q: Vec<f32> = (0..2 * 32).map(|i| i as f32 * 0.01).collect();
-        let q = Tensor::<TestBackend, 3>::from_data(TensorData::new(q, [1, 2, 32]), &device);
+        let q = Tensor::<3>::from_data(TensorData::new(q, [1, 2, 32]), &device);
         let embedded = detokenizer.embed_tokens.forward(q);
         let expanded = detokenizer.expand_codes(embedded.clone());
         assert_eq!(expanded.dims(), [2, 5, 32]);
 
-        let embedded_values = embedded.to_data().to_vec::<f32>().expect("embedded");
-        let expanded_values = expanded.to_data().to_vec::<f32>().expect("expanded");
+        let embedded_values = embedded.to_data().try_to_vec::<f32>().expect("embedded");
+        let expanded_values = expanded.to_data().try_to_vec::<f32>().expect("expanded");
         for t in 0..2 {
             for p in 0..5 {
                 for h in 0..32 {
@@ -859,30 +850,28 @@ mod tests {
     #[test]
     fn lyric_encoder_ignores_padded_values() {
         let config = tiny_config();
-        let device = Default::default();
-        let encoder = LyricEncoder::<TestBackend>::new(&config, &device);
-        let mask = Tensor::<TestBackend, 2, Int>::from_data([[1, 0]], &device);
+        let device = burn::tensor::Device::flex();
+        let encoder = LyricEncoder::new(&config, &device);
+        let mask = Tensor::<2, Int>::from_data([[1, 0]], &device);
 
         let mut row_a = vec![0.05f32; 8];
         row_a.extend(vec![1.0f32; 8]);
         let mut row_b = vec![0.05f32; 8];
         row_b.extend(vec![-7.0f32; 8]);
-        let input_a =
-            Tensor::<TestBackend, 3>::from_data(TensorData::new(row_a, [1, 2, 8]), &device);
-        let input_b =
-            Tensor::<TestBackend, 3>::from_data(TensorData::new(row_b, [1, 2, 8]), &device);
+        let input_a = Tensor::<3>::from_data(TensorData::new(row_a, [1, 2, 8]), &device);
+        let input_b = Tensor::<3>::from_data(TensorData::new(row_b, [1, 2, 8]), &device);
 
         let out_a = encoder.forward(input_a, mask.clone());
         let out_b = encoder.forward(input_b, mask);
         let valid_a = out_a
             .slice([0..1, 0..1, 0..32])
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("out_a");
         let valid_b = out_b
             .slice([0..1, 0..1, 0..32])
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("out_b");
         for (a, b) in valid_a.iter().zip(valid_b.iter()) {
             assert!(

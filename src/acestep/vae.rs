@@ -39,7 +39,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use burn::module::{Module, Param};
-use burn::prelude::Backend;
 use burn::tensor::Tensor;
 use burn::tensor::module::{conv_transpose1d, conv1d};
 use burn::tensor::ops::{ConvOptions, ConvTransposeOptions};
@@ -80,20 +79,20 @@ impl OobleckVaeConfig {
 /// Snake activation with learned per-channel `alpha` and `beta` in log scale:
 /// `x + sin(exp(alpha) * x)^2 / (exp(beta) + 1e-9)`.
 #[derive(Module, Debug)]
-pub struct Snake1d<B: Backend> {
-    pub alpha: Param<Tensor<B, 3>>,
-    pub beta: Param<Tensor<B, 3>>,
+pub struct Snake1d {
+    pub alpha: Param<Tensor<3>>,
+    pub beta: Param<Tensor<3>>,
 }
 
-impl<B: Backend> Snake1d<B> {
-    pub fn new(channels: usize, device: &B::Device) -> Self {
+impl Snake1d {
+    pub fn new(channels: usize, device: &burn::tensor::Device) -> Self {
         Self {
             alpha: Param::from_tensor(Tensor::zeros([1, channels, 1], device)),
             beta: Param::from_tensor(Tensor::zeros([1, channels, 1], device)),
         }
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         let alpha = self.alpha.val().exp();
         let beta = self.beta.val().exp();
         x.clone() + (alpha * x).sin().powf_scalar(2.0) / (beta + 1e-9)
@@ -103,15 +102,15 @@ impl<B: Backend> Snake1d<B> {
 /// Weight-normalized 1D convolution (stride 1 "same" convs and the k=7
 /// input/output convs of the decoder).
 #[derive(Module, Debug)]
-pub struct WnConv1d<B: Backend> {
-    weight_g: Param<Tensor<B, 3>>,
-    weight_v: Param<Tensor<B, 3>>,
-    bias: Option<Param<Tensor<B, 1>>>,
+pub struct WnConv1d {
+    weight_g: Param<Tensor<3>>,
+    weight_v: Param<Tensor<3>>,
+    bias: Option<Param<Tensor<1>>>,
     padding: usize,
     dilation: usize,
 }
 
-impl<B: Backend> WnConv1d<B> {
+impl WnConv1d {
     fn new(
         in_channels: usize,
         out_channels: usize,
@@ -119,7 +118,7 @@ impl<B: Backend> WnConv1d<B> {
         padding: usize,
         dilation: usize,
         bias: bool,
-        device: &B::Device,
+        device: &burn::tensor::Device,
     ) -> Self {
         Self {
             weight_g: Param::from_tensor(Tensor::ones([out_channels, 1, 1], device)),
@@ -134,7 +133,7 @@ impl<B: Backend> WnConv1d<B> {
     }
 
     /// Effective weight `g * v / (||v|| + 1e-12)`, norm per output channel.
-    fn weight(&self) -> Tensor<B, 3> {
+    fn weight(&self) -> Tensor<3> {
         let g = self.weight_g.val();
         let v = self.weight_v.val();
         let out_channels = v.dims()[0];
@@ -148,7 +147,7 @@ impl<B: Backend> WnConv1d<B> {
         g * v / (v_norm + 1e-12)
     }
 
-    fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         let bias = self.bias.as_ref().map(|bias| bias.val());
         conv1d(
             x,
@@ -161,16 +160,21 @@ impl<B: Backend> WnConv1d<B> {
 
 /// Weight-normalized 1D transpose convolution used for upsampling.
 #[derive(Module, Debug)]
-pub struct WnConvTranspose1d<B: Backend> {
-    weight_g: Param<Tensor<B, 3>>,
-    weight_v: Param<Tensor<B, 3>>,
-    bias: Param<Tensor<B, 1>>,
+pub struct WnConvTranspose1d {
+    weight_g: Param<Tensor<3>>,
+    weight_v: Param<Tensor<3>>,
+    bias: Param<Tensor<1>>,
     stride: usize,
     padding: usize,
 }
 
-impl<B: Backend> WnConvTranspose1d<B> {
-    fn new(in_channels: usize, out_channels: usize, stride: usize, device: &B::Device) -> Self {
+impl WnConvTranspose1d {
+    fn new(
+        in_channels: usize,
+        out_channels: usize,
+        stride: usize,
+        device: &burn::tensor::Device,
+    ) -> Self {
         Self {
             weight_g: Param::from_tensor(Tensor::ones([in_channels, 1, 1], device)),
             weight_v: Param::from_tensor(Tensor::zeros(
@@ -185,7 +189,7 @@ impl<B: Backend> WnConvTranspose1d<B> {
 
     /// Effective weight `g * v / (||v|| + 1e-12)`, norm per input channel
     /// (dim 0 of the transpose-conv kernel, as in `weight_norm` with dim=0).
-    fn weight(&self) -> Tensor<B, 3> {
+    fn weight(&self) -> Tensor<3> {
         let g = self.weight_g.val();
         let v = self.weight_v.val();
         let in_channels = v.dims()[0];
@@ -199,7 +203,7 @@ impl<B: Backend> WnConvTranspose1d<B> {
         g * v / (v_norm + 1e-12)
     }
 
-    fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         conv_transpose1d(
             x,
             self.weight(),
@@ -213,15 +217,15 @@ impl<B: Backend> WnConvTranspose1d<B> {
 /// conv and a k=1 conv. With same-padding the sequence length is preserved,
 /// so the length-mismatch crop in the reference is a no-op and is omitted.
 #[derive(Module, Debug)]
-pub struct OobleckResidualUnit<B: Backend> {
-    pub snake1: Snake1d<B>,
-    pub conv1: WnConv1d<B>,
-    pub snake2: Snake1d<B>,
-    pub conv2: WnConv1d<B>,
+pub struct OobleckResidualUnit {
+    pub snake1: Snake1d,
+    pub conv1: WnConv1d,
+    pub snake2: Snake1d,
+    pub conv2: WnConv1d,
 }
 
-impl<B: Backend> OobleckResidualUnit<B> {
-    pub fn new(channels: usize, dilation: usize, device: &B::Device) -> Self {
+impl OobleckResidualUnit {
+    pub fn new(channels: usize, dilation: usize, device: &burn::tensor::Device) -> Self {
         Self {
             snake1: Snake1d::new(channels, device),
             conv1: WnConv1d::new(channels, channels, 7, 3 * dilation, dilation, true, device),
@@ -230,7 +234,7 @@ impl<B: Backend> OobleckResidualUnit<B> {
         }
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         let residual = x.clone();
         let out = self.conv1.forward(self.snake1.forward(x));
         let out = self.conv2.forward(self.snake2.forward(out));
@@ -241,16 +245,21 @@ impl<B: Backend> OobleckResidualUnit<B> {
 /// Decoder block: Snake -> ConvTranspose1d upsampling -> 3 residual units
 /// with dilations 1, 3, 9.
 #[derive(Module, Debug)]
-pub struct OobleckDecoderBlock<B: Backend> {
-    pub snake1: Snake1d<B>,
-    pub conv_t1: WnConvTranspose1d<B>,
-    pub res_unit1: OobleckResidualUnit<B>,
-    pub res_unit2: OobleckResidualUnit<B>,
-    pub res_unit3: OobleckResidualUnit<B>,
+pub struct OobleckDecoderBlock {
+    pub snake1: Snake1d,
+    pub conv_t1: WnConvTranspose1d,
+    pub res_unit1: OobleckResidualUnit,
+    pub res_unit2: OobleckResidualUnit,
+    pub res_unit3: OobleckResidualUnit,
 }
 
-impl<B: Backend> OobleckDecoderBlock<B> {
-    pub fn new(in_channels: usize, out_channels: usize, stride: usize, device: &B::Device) -> Self {
+impl OobleckDecoderBlock {
+    pub fn new(
+        in_channels: usize,
+        out_channels: usize,
+        stride: usize,
+        device: &burn::tensor::Device,
+    ) -> Self {
         Self {
             snake1: Snake1d::new(in_channels, device),
             conv_t1: WnConvTranspose1d::new(in_channels, out_channels, stride, device),
@@ -260,7 +269,7 @@ impl<B: Backend> OobleckDecoderBlock<B> {
         }
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, x: Tensor<3>) -> Tensor<3> {
         let x = self.conv_t1.forward(self.snake1.forward(x));
         let x = self.res_unit1.forward(x);
         let x = self.res_unit2.forward(x);
@@ -271,18 +280,18 @@ impl<B: Backend> OobleckDecoderBlock<B> {
 /// Oobleck VAE decoder. See the module-level docs for the canonical burnpack
 /// tensor names.
 #[derive(Module, Debug)]
-pub struct OobleckDecoder<B: Backend> {
-    pub conv1: WnConv1d<B>,
-    pub block: Vec<OobleckDecoderBlock<B>>,
-    pub snake1: Snake1d<B>,
-    pub conv2: WnConv1d<B>,
+pub struct OobleckDecoder {
+    pub conv1: WnConv1d,
+    pub block: Vec<OobleckDecoderBlock>,
+    pub snake1: Snake1d,
+    pub conv2: WnConv1d,
     /// Audio samples per latent frame (product of `downsampling_ratios`).
     pub hop_length: usize,
     latent_channels: usize,
 }
 
-impl<B: Backend> OobleckDecoder<B> {
-    pub fn new(config: &OobleckVaeConfig, device: &B::Device) -> Self {
+impl OobleckDecoder {
+    pub fn new(config: &OobleckVaeConfig, device: &burn::tensor::Device) -> Self {
         // Channel multiples with the prepended base multiple, as in the
         // reference: [1] + channel_multiples.
         let mut multiples = Vec::with_capacity(config.channel_multiples.len() + 1);
@@ -338,10 +347,10 @@ impl<B: Backend> OobleckDecoder<B> {
     pub fn from_burnpack(
         config: &OobleckVaeConfig,
         path: &Path,
-        device: &B::Device,
+        device: &burn::tensor::Device,
     ) -> Result<Self> {
         let mut model = Self::new(config, device);
-        let mut store = BurnpackStore::from_file(path).zero_copy(true);
+        let mut store = BurnpackStore::from_file(path);
         model.load_from(&mut store).map_err(|err| {
             anyhow::anyhow!("failed to load VAE decoder from {}: {err}", path.display())
         })?;
@@ -350,7 +359,7 @@ impl<B: Backend> OobleckDecoder<B> {
 
     /// Forward pass on channel-major latents `[B, decoder_input_channels, T]`
     /// returning audio `[B, audio_channels, T * hop_length]`.
-    pub fn forward(&self, latents: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&self, latents: Tensor<3>) -> Tensor<3> {
         let x = self.conv1.forward(latents);
         let x = self
             .block
@@ -367,7 +376,7 @@ impl<B: Backend> OobleckDecoder<B> {
     /// upsamples by exactly its stride and the output length is already
     /// `T * hop_length`; the final trim/pad only matters for hypothetical
     /// odd ratios, where ConvTranspose1d falls one sample short per stage.
-    pub fn decode(&self, latents: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn decode(&self, latents: Tensor<3>) -> Tensor<3> {
         let [batch, frames, channels] = latents.dims();
         assert_eq!(
             channels, self.latent_channels,
@@ -397,9 +406,6 @@ impl<B: Backend> OobleckDecoder<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::ndarray::{NdArray, NdArrayDevice};
-
-    type TestBackend = NdArray<f32>;
 
     fn tiny_config() -> OobleckVaeConfig {
         OobleckVaeConfig {
@@ -414,10 +420,10 @@ mod tests {
 
     #[test]
     fn decode_produces_stereo_audio_of_expected_length() {
-        let device = NdArrayDevice::default();
-        let decoder = OobleckDecoder::<TestBackend>::new(&tiny_config(), &device);
+        let device = burn::tensor::Device::flex();
+        let decoder = OobleckDecoder::new(&tiny_config(), &device);
 
-        let latents = Tensor::<TestBackend, 3>::random(
+        let latents = Tensor::<3>::random(
             [1, 5, 4],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &device,
@@ -425,18 +431,18 @@ mod tests {
         let audio = decoder.decode(latents);
 
         assert_eq!(audio.dims(), [1, 2, 5 * 6]);
-        let values: Vec<f32> = audio.into_data().to_vec().unwrap();
+        let values: Vec<f32> = audio.into_data().try_to_vec().unwrap();
         assert!(values.iter().all(|v| v.is_finite()));
     }
 
     #[test]
     fn decode_upsamples_each_stage() {
-        let device = NdArrayDevice::default();
+        let device = burn::tensor::Device::flex();
         let config = tiny_config();
-        let decoder = OobleckDecoder::<TestBackend>::new(&config, &device);
+        let decoder = OobleckDecoder::new(&config, &device);
 
         // Stage strides are the downsampling ratios reversed: [3, 2].
-        let x = Tensor::<TestBackend, 3>::zeros([1, 4, 5], &device);
+        let x = Tensor::<3>::zeros([1, 4, 5], &device);
         let x = decoder.conv1.forward(x);
         assert_eq!(x.dims(), [1, 16, 5]);
         let x = decoder.block[0].forward(x);
@@ -447,9 +453,9 @@ mod tests {
 
     #[test]
     fn residual_unit_preserves_shape() {
-        let device = NdArrayDevice::default();
-        let unit = OobleckResidualUnit::<TestBackend>::new(8, 3, &device);
-        let x = Tensor::<TestBackend, 3>::random(
+        let device = burn::tensor::Device::flex();
+        let unit = OobleckResidualUnit::new(8, 3, &device);
+        let x = Tensor::<3>::random(
             [2, 8, 11],
             burn::tensor::Distribution::Normal(0.0, 1.0),
             &device,

@@ -6,10 +6,10 @@ use maolan_generate::acestep::lm::AceStepLm;
 use maolan_generate::acestep::qwen3::{Qwen3Config, Qwen3Model};
 use std::path::Path;
 
-fn top5<B: burn::tensor::backend::Backend>(model: &Qwen3Model<B>, label: &str, device: &B::Device) {
+fn top5(model: &Qwen3Model, label: &str, device: &burn::tensor::Device) {
     let ids = vec![151644i64, 8948, 198, 2, 29051, 198, 31115, 7699];
     let n = ids.len();
-    let input = Tensor::<B, 2, Int>::from_data(TensorData::new(ids, [1, n]), device);
+    let input = Tensor::<2, Int>::from_data(TensorData::new(ids, [1, n]), device);
     let hidden = model.forward(input, true);
     let [_, _, hidden_dim] = hidden.dims();
     let last = hidden.narrow(1, n - 1, 1).reshape([1, hidden_dim]);
@@ -19,7 +19,7 @@ fn top5<B: burn::tensor::backend::Backend>(model: &Qwen3Model<B>, label: &str, d
     let values: Vec<f32> = logits
         .into_data()
         .convert::<f32>()
-        .to_vec()
+        .try_to_vec()
         .expect("logits");
     let nan = values.iter().filter(|v| v.is_nan()).count();
     let inf = values.iter().filter(|v| v.is_infinite()).count();
@@ -38,21 +38,16 @@ fn main() -> anyhow::Result<()> {
     let config = Qwen3Config::load(&model_dir.join("sft-lm_config.json"))?;
     let bpk = model_dir.join("sft-acestep-lm.bpk");
 
-    let dev32 = Default::default();
-    let lm32 = AceStepLm::<burn::backend::NdArray<f32>>::from_burnpack(&config, &bpk, &dev32)?;
+    let dev32 = burn::tensor::Device::flex();
+    let lm32 = AceStepLm::from_burnpack(&config, &bpk, &dev32)?;
     top5(&lm32.model, "f32", &dev32);
 
-    let dev16: burn::backend::wgpu::WgpuDevice = Default::default();
-    burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::Vulkan>(
-        &dev16,
-        burn::backend::wgpu::RuntimeOptions {
-            memory_config: burn::backend::wgpu::MemoryConfiguration::ExclusivePages,
-            ..Default::default()
-        },
-    );
-    let lm16 = AceStepLm::<burn::backend::Wgpu<burn::tensor::f16, i64, u32>>::from_burnpack_cast(
-        &config, &bpk, &dev16,
-    )?;
+    let dev16 = burn::tensor::Device::wgpu_options()
+        .graphics_api(burn::tensor::wgpu::WgpuBackend::Vulkan)
+        .memory_config(burn::tensor::wgpu::MemoryConfiguration::ExclusivePages)
+        .init()
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let lm16 = AceStepLm::from_burnpack_cast(&config, &bpk, &dev16)?;
     top5(&lm16.model, "f16", &dev16);
     Ok(())
 }

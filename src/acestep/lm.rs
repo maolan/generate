@@ -24,7 +24,6 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use burn::prelude::Backend;
 use burn::tensor::{DType, Int, Tensor, TensorData};
 use burn_store::ModuleStore;
 use rand::rngs::SmallRng;
@@ -226,48 +225,49 @@ impl SamplingConfig {
 /// Qwen3ForCausalLM with a tied lm_head: logits are
 /// `hidden @ embed_tokens.weight^T`.
 #[derive(Debug)]
-pub struct AceStepLm<B: Backend> {
-    pub model: Qwen3Model<B>,
+pub struct AceStepLm {
+    pub model: Qwen3Model,
 }
 
-impl<B: Backend> AceStepLm<B> {
-    pub fn new(config: &Qwen3Config, device: &B::Device) -> Self {
+impl AceStepLm {
+    pub fn new(config: &Qwen3Config, device: &burn::tensor::Device) -> Self {
         Self {
             model: Qwen3Model::new(config, device),
         }
     }
 
-    pub fn from_burnpack(config: &Qwen3Config, path: &Path, device: &B::Device) -> Result<Self> {
+    pub fn from_burnpack(
+        config: &Qwen3Config,
+        path: &Path,
+        device: &burn::tensor::Device,
+    ) -> Result<Self> {
         Ok(Self {
             model: Qwen3Model::from_burnpack(config, path, device)?,
         })
     }
 
     /// Load weights from a burnpack file, casting every tensor to the
-    /// backend's native float element (e.g. loading the f32 export into an
+    /// f16 (loading the f32 export into an
     /// f16 planner — halves planner VRAM on wgpu).
     pub fn from_burnpack_cast(
         config: &Qwen3Config,
         path: &Path,
-        device: &B::Device,
+        device: &burn::tensor::Device,
     ) -> Result<Self> {
         let mut model = Self::new(config, device);
         let snapshots = burn_store::BurnpackStore::from_file(path)
-            .zero_copy(true)
-            .get_all_snapshots()
+            .get_all_tensors()
             .with_context(|| format!("failed to read snapshots from {}", path.display()))?
             .clone();
         let mut converted = Vec::with_capacity(snapshots.len());
         for snapshot in snapshots.values() {
-            let data = snapshot
-                .to_data()
-                .map_err(|e| anyhow::anyhow!("failed to decode {}: {e:?}", snapshot.full_path()))?
-                .convert::<B::FloatElem>();
-            converted.push(burn_store::TensorSnapshot::from_data(
+            let data = burn_store::bridge::to_data(snapshot)
+                .map_err(|e| anyhow::anyhow!("failed to decode {}: {e:?}", snapshot.name))?
+                .convert::<burn::tensor::f16>();
+            converted.push(burn_store::bridge::from_data(
                 data,
-                snapshot.path_stack.clone().unwrap_or_default(),
-                snapshot.container_stack.clone().unwrap_or_default(),
-                snapshot.tensor_id.unwrap_or_default(),
+                snapshot.name.clone(),
+                snapshot.param_id,
             ));
         }
         let result =
@@ -311,15 +311,15 @@ impl<B: Backend> AceStepLm<B> {
         let prompt_len = prompt_token_ids.len();
         let hidden =
             self.model
-                .forward_cached(ids_tensor::<B>(prompt_token_ids, &device), &mut cache, 0);
+                .forward_cached(ids_tensor(prompt_token_ids, &device), &mut cache, 0);
         let mut logits = self.last_position_logits(hidden);
 
         let (mut uncond_cache, mut uncond_logits, uncond_len) = if use_cfg {
             let uncond_ids = uncond_token_ids.expect("cfg requires uncond ids");
             let mut cache = self.model.new_cache();
-            let hidden =
-                self.model
-                    .forward_cached(ids_tensor::<B>(uncond_ids, &device), &mut cache, 0);
+            let hidden = self
+                .model
+                .forward_cached(ids_tensor(uncond_ids, &device), &mut cache, 0);
             let logits = self.last_position_logits(hidden);
             (Some(cache), Some(logits), uncond_ids.len())
         } else {
@@ -351,14 +351,14 @@ impl<B: Backend> AceStepLm<B> {
                 codes.push(code);
             }
             let hidden = self.model.forward_cached(
-                ids_tensor::<B>(&[token], &device),
+                ids_tensor(&[token], &device),
                 &mut cache,
                 prompt_len + step,
             );
             logits = self.last_position_logits(hidden);
             if let (Some(cache), Some(uncond)) = (&mut uncond_cache, &mut uncond_logits) {
                 let hidden = self.model.forward_cached(
-                    ids_tensor::<B>(&[token], &device),
+                    ids_tensor(&[token], &device),
                     cache,
                     uncond_len + step,
                 );
@@ -372,7 +372,7 @@ impl<B: Backend> AceStepLm<B> {
     }
 
     /// Tied lm_head logits at the last sequence position, as a flat f32 vec.
-    fn last_position_logits(&self, hidden: Tensor<B, 3>) -> Vec<f32> {
+    fn last_position_logits(&self, hidden: Tensor<3>) -> Vec<f32> {
         let [batch, seq_len, hidden_size] = hidden.dims();
         let last = hidden
             .slice([0..batch, seq_len - 1..seq_len, 0..hidden_size])
@@ -382,15 +382,15 @@ impl<B: Backend> AceStepLm<B> {
         logits
             .cast(DType::F32)
             .to_data()
-            .to_vec::<f32>()
+            .try_to_vec::<f32>()
             .expect("lm_head logits should materialize as f32")
     }
 }
 
-fn ids_tensor<B: Backend>(ids: &[u32], device: &B::Device) -> Tensor<B, 2, Int> {
+fn ids_tensor(ids: &[u32], device: &burn::tensor::Device) -> Tensor<2, Int> {
     let data: Vec<i64> = ids.iter().map(|&t| i64::from(t)).collect();
     let len = data.len();
-    Tensor::<B, 2, Int>::from_data(TensorData::new(data, [1, len]), device)
+    Tensor::<2, Int>::from_data(TensorData::new(data, [1, len]), device)
 }
 
 /// Restricted sampling over a logit vector for code generation: only
@@ -475,9 +475,6 @@ pub fn tokenize_prompt(tokenizer_json_path: &Path, text: &str) -> Result<Vec<u32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use burn::backend::NdArray;
-
-    type TestBackend = NdArray<f32>;
 
     fn testdata(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -588,7 +585,7 @@ mod tests {
         assert_eq!(ids, vec![4, 0, 5]);
     }
 
-    fn tiny_lm() -> AceStepLm<TestBackend> {
+    fn tiny_lm() -> AceStepLm {
         let config = Qwen3Config {
             hidden_size: 32,
             intermediate_size: 64,
@@ -602,7 +599,7 @@ mod tests {
             max_position_embeddings: 512,
             tie_word_embeddings: true,
         };
-        let device = Default::default();
+        let device = burn::tensor::Device::flex();
         AceStepLm::new(&config, &device)
     }
 
