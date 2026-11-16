@@ -463,13 +463,15 @@ fn sample_codes_token(
 /// `<|im_start|>` / `<|im_end|>` / `<|audio_code_N|>` strings in the prompt
 /// map to their special ids directly and no manual pre-pass is needed.
 pub fn tokenize_prompt(tokenizer_json_path: &Path, text: &str) -> Result<Vec<u32>> {
-    let tokenizer = tokie::Tokenizer::from_json(tokenizer_json_path).map_err(|e| {
+    let mut tokenizer = tokie::Tokenizer::from_json(tokenizer_json_path).map_err(|e| {
         anyhow::anyhow!(
             "failed to load tokenizer from {}: {e}",
             tokenizer_json_path.display()
         )
     })?;
-    Ok(tokenizer.encode(text, false).ids)
+    let mut ids = Vec::new();
+    tokenizer.encode(text, &mut ids)?;
+    Ok(ids)
 }
 
 #[cfg(test)]

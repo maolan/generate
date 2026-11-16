@@ -53,7 +53,9 @@ where
     let mut writer = BufWriter::new(file);
 
     for id in 0..LLAMA_BASE_VOCAB_SIZE {
-        let bytes = tokenizer.token_to_bytes(id as u32);
+        let bytes = tokenizer
+            .decode_bytes(&[id as u32], tokie::Specials::Keep)
+            .map_err(|err| anyhow::anyhow!("failed to decode tokenizer id {id}: {err}"))?;
         let line = format!("{} {}\n", STANDARD.encode(bytes), id);
         writer
             .write_all(line.as_bytes())
@@ -173,7 +175,8 @@ mod tests {
             .send()
             .expect("download tokenizer.json");
 
-        let hf_tokenizer = tokie::Tokenizer::from_json(&tokenizer_json).expect("load HF tokenizer");
+        let mut hf_tokenizer =
+            tokie::Tokenizer::from_json(&tokenizer_json).expect("load HF tokenizer");
         let tiktoken_path = ensure_tiktoken_model(&tokenizer_json).expect("convert tokenizer");
         let tiktoken = Tiktoken::new(tiktoken_path.to_str().unwrap()).expect("load tiktoken model");
 
@@ -185,7 +188,10 @@ mod tests {
         ];
 
         for prompt in &test_prompts {
-            let hf_ids = hf_tokenizer.encode_ids(prompt, true);
+            let mut hf_ids = Vec::new();
+            hf_tokenizer
+                .encode_plus(*prompt, &mut hf_ids)
+                .expect("encode prompt");
             let tiktoken_ids = tiktoken.encode(prompt, true, false);
             assert_eq!(
                 hf_ids, tiktoken_ids,

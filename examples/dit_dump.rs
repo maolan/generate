@@ -95,13 +95,14 @@ fn main() -> anyhow::Result<()> {
     let vae =
         OobleckDecoder::from_burnpack(&vae_config, &model_dir.join("acestep-vae.bpk"), &device)?;
     let silence = SilenceLatent::from_burnpack(&model_dir.join("silence_latent.bpk"), &device)?;
-    let tokenizer = tokie::Tokenizer::from_json(model_dir.join("tokenizer.json"))
+    let mut tokenizer = tokie::Tokenizer::from_json(model_dir.join("tokenizer.json"))
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
 
     // ---- text + lyric encoding (causal, official prompts) ----
     let metas = build_metas_block(Some(120.0), Some("A minor"), Some("4/4"), 4);
     let text_prompt = build_dit_text_prompt("Metal guitar with a lot of distortion", &metas);
-    let ids = tokenizer.encode(&text_prompt, false).ids;
+    let mut ids = Vec::new();
+    tokenizer.encode(&text_prompt, &mut ids)?;
     let mut ids: Vec<i64> = ids.into_iter().map(i64::from).collect();
     ids.push(151643); // explicit EOS (official add_eos=true)
     let n_text = ids.len();
@@ -115,12 +116,11 @@ fn main() -> anyhow::Result<()> {
         &[n_text as i32, 1024],
     );
 
-    let lyric_ids = tokenizer
-        .encode(
-            maolan_generate::acestep::pipeline::INSTRUMENTAL_LYRIC_PROMPT,
-            false,
-        )
-        .ids;
+    let mut lyric_ids = Vec::new();
+    tokenizer.encode(
+        maolan_generate::acestep::pipeline::INSTRUMENTAL_LYRIC_PROMPT,
+        &mut lyric_ids,
+    )?;
     let mut lyric_ids: Vec<i64> = lyric_ids.into_iter().map(i64::from).collect();
     lyric_ids.push(151643); // explicit EOS (official add_eos=true)
     let n_lyric = lyric_ids.len();

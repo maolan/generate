@@ -27,7 +27,11 @@ permissions:
 jobs:
   lint-and-test:
     if: ${{ !inputs.release_build }}
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
 
@@ -48,66 +52,196 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets
 
-  build-release:
+  build-release-ubuntu:
     if: ${{ inputs.release_build }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            suffix: linux-x86_64
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            suffix: macos-arm64
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            suffix: windows-x86_64
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
+    env:
+      ASSET_BASENAME: maolan-generate-${{ inputs.release_tag }}-linux-x86_64
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Linux packages
+        run: |
+          mkdir -p dist
+          cargo build --release
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          staging="$RUNNER_TEMP/maolan-generate-deb"
+          mkdir -p "$staging/DEBIAN" "$staging/usr/bin" "$staging/usr/share/doc/maolan-generate"
+          install -m 0755 target/release/maolan-generate "$staging/usr/bin/maolan-generate"
+          install -m 0644 LICENSE README.md "$staging/usr/share/doc/maolan-generate/"
+          cat > "$staging/DEBIAN/control" <<EOF
+          Package: maolan-generate
+          Version: $version
+          Section: sound
+          Priority: optional
+          Architecture: amd64
+          Depends: libvulkan1
+          Maintainer: Maolan Team <maolan@maolan.rs>
+          Description: Maolan AI Music Generation CLI
+           CLI for prompt driven AI music generation.
+          EOF
+          dpkg-deb --build "$staging" "dist/maolan-generate-${version}-ubuntu.amd64.deb"
+          mkdir -p "$RUNNER_TEMP/${ASSET_BASENAME}"
+          cp target/release/maolan-generate LICENSE README.md "$RUNNER_TEMP/${ASSET_BASENAME}/"
+          tar -C "$RUNNER_TEMP" -czf "dist/${ASSET_BASENAME}.tar.gz" "${ASSET_BASENAME}"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ASSET_BASENAME }}
+          path: dist/
+
+  build-release-fedora:
+    if: ${{ inputs.release_build }}
+    runs-on: ubuntu-latest
+    container: fedora:42
+    env:
+      ASSET_BASENAME: maolan-generate-${{ inputs.release_tag }}-linux-x86_64
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: dnf install -y gcc gcc-c++ make pkgconf-pkg-config vulkan-loader rpm-build curl ca-certificates tar gzip
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build RPM
+        run: |
+          mkdir -p dist
+          cargo build --release
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          topdir="$PWD/rpmbuild"
+          mkdir -p "$topdir"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          cat > "$topdir/SPECS/maolan-generate.spec" <<EOF
+          Name:           maolan-generate
+          Version:        $version
+          Release:        1%{?dist}
+          Summary:        Maolan AI Music Generation CLI
+          License:        BSD-2-Clause
+          URL:            https://github.com/maolan/generate
+          BuildArch:      x86_64
+          Requires:       vulkan-loader
+
+          %description
+          CLI for AI music generation using Maolan.
+
+          %install
+          mkdir -p %{buildroot}/usr/bin %{buildroot}/usr/share/doc/maolan-generate
+          install -m 0755 "$PWD/target/release/maolan-generate" %{buildroot}/usr/bin/maolan-generate
+          install -m 0644 "$PWD/LICENSE" "$PWD/README.md" %{buildroot}/usr/share/doc/maolan-generate/
+
+          %files
+          /usr/bin/maolan-generate
+          %license /usr/share/doc/maolan-generate/LICENSE
+          %doc /usr/share/doc/maolan-generate/README.md
+          EOF
+          rpmbuild -bb --define "_topdir $topdir" "$topdir/SPECS/maolan-generate.spec"
+          cp "$topdir/RPMS/x86_64/"*.rpm dist/
+
+      - name: Upload Fedora artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: maolan-generate-${{ inputs.release_tag }}-fedora-x86_64
+          path: dist/*.rpm
+
+  build-release-macos:
+    if: ${{ inputs.release_build }}
+    runs-on: macos-latest
+    env:
+      ASSET_BASENAME: maolan-generate-${{ inputs.release_tag }}-macos-arm64
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Package release binary (Unix)
-        if: runner.os != 'Windows'
-        shell: bash
+      - name: Build and package macOS binary
         run: |
-          asset="maolan-generate-${{ inputs.release_tag }}-${{ matrix.suffix }}"
-          mkdir -p "dist/$asset"
-          cp "target/${{ matrix.target }}/release/maolan-generate" "dist/$asset/"
-          cp LICENSE README.md "dist/$asset/"
-          tar -C dist -czf "dist/$asset.tar.gz" "$asset"
+          cargo build --release --target aarch64-apple-darwin
+          mkdir -p "dist/${ASSET_BASENAME}"
+          cp target/aarch64-apple-darwin/release/maolan-generate "dist/${ASSET_BASENAME}/"
+          cp LICENSE README.md "dist/${ASSET_BASENAME}/"
+          tar -C dist -czf "dist/${ASSET_BASENAME}.tar.gz" "${ASSET_BASENAME}"
 
-      - name: Package release binary (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $asset = "maolan-generate-${{ inputs.release_tag }}-${{ matrix.suffix }}"
-          New-Item -ItemType Directory -Force "dist/$asset" | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/maolan-generate.exe" "dist/$asset/"
-          Copy-Item LICENSE, README.md "dist/$asset/"
-          Compress-Archive -Path "dist/$asset" -DestinationPath "dist/$asset.zip"
-
-      - name: Upload release artifact
+      - name: Upload macOS artifact
         uses: actions/upload-artifact@v7
         with:
-          name: maolan-generate-${{ inputs.release_tag }}-${{ matrix.suffix }}
-          path: dist/*.*
+          name: ${{ env.ASSET_BASENAME }}
+          path: dist/*.tar.gz
+
+  build-release-windows:
+    if: ${{ inputs.release_build }}
+    runs-on: windows-latest
+    env:
+      ASSET_BASENAME: maolan-generate-${{ inputs.release_tag }}-windows-x86_64
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Windows binary
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Install NSIS
+        run: choco install nsis --no-progress --yes
+
+      - name: Build installer and ZIP
+        shell: pwsh
+        run: |
+          $asset = "${{ env.ASSET_BASENAME }}"
+          $stage = "C:\maolan-staging\generate"
+          $nsiTemp = Join-Path $env:RUNNER_TEMP "maolan-generate-installer"
+          New-Item -ItemType Directory -Force $stage, $nsiTemp, dist, "dist/$asset" | Out-Null
+          Copy-Item target\x86_64-pc-windows-msvc\release\maolan-generate.exe, LICENSE "$stage\"
+          Invoke-WebRequest -Uri "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile "$stage\vc_redist.x64.exe"
+          Copy-Item scripts\installer.nsi "$nsiTemp\installer.nsi"
+          Copy-Item LICENSE "$nsiTemp\LICENSE"
+          $pkgVersion = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          $versionMatch = [regex]::Match($pkgVersion, '^(\d+)\.(\d+)\.(\d+)')
+          if (-not $versionMatch.Success) { throw "Unsupported installer version: $pkgVersion" }
+          $productVersion = "$($versionMatch.Groups[1].Value).$($versionMatch.Groups[2].Value).$($versionMatch.Groups[3].Value).0"
+          Push-Location $nsiTemp
+          & "${env:ProgramFiles(x86)}\NSIS\makensis.exe" /INPUTCHARSET UTF8 "/DMAOLAN_GENERATE_VERSION=$pkgVersion" "/DMAOLAN_GENERATE_PRODUCT_VERSION=$productVersion" "$nsiTemp\installer.nsi"
+          if ($LASTEXITCODE -ne 0) { throw "NSIS failed with exit code $LASTEXITCODE" }
+          Pop-Location
+          Copy-Item "$nsiTemp\maolan-generate-setup.exe" "dist/$asset.exe"
+          Copy-Item target\x86_64-pc-windows-msvc\release\maolan-generate.exe, LICENSE, README.md "dist/$asset/"
+          Compress-Archive -Path "dist/$asset" -DestinationPath "dist/$asset.zip"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ASSET_BASENAME }}
+          path: dist/
 
   publish-release-assets:
     if: ${{ inputs.release_build }}
     runs-on: ubuntu-latest
-    needs: build-release
+    needs:
+      - build-release-ubuntu
+      - build-release-fedora
+      - build-release-macos
+      - build-release-windows
     steps:
       - uses: actions/checkout@v6
 
@@ -123,7 +257,7 @@ jobs:
           TAG_NAME: ${{ inputs.release_tag }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          mapfile -t artifacts < <(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | sort)
+          mapfile -t artifacts < <(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.deb' -o -name '*.rpm' -o -name '*.dmg' -o -name '*.exe' \) | sort)
           if [ "${#artifacts[@]}" -eq 0 ]; then
             echo "No release artifacts found in dist/"
             find dist -maxdepth 3 -print
