@@ -1586,14 +1586,15 @@ impl HeartmulaRmsNorm {
 }
 
 pub fn tokenize_text(tokenizer_json: &Path, text: &str) -> Result<Vec<i64>> {
-    let tokenizer = Tokenizer::from_json(tokenizer_json).map_err(|e| {
+    let mut tokenizer = Tokenizer::from_json(tokenizer_json).map_err(|e| {
         anyhow!(
             "failed to load tokenizer from {}: {e}",
             tokenizer_json.display()
         )
     })?;
-    let encoding = tokenizer.encode(text, true);
-    Ok(encoding.ids.into_iter().map(i64::from).collect())
+    let mut ids = Vec::new();
+    tokenizer.encode_plus(text, &mut ids)?;
+    Ok(ids.into_iter().map(i64::from).collect())
 }
 
 pub fn default_tags() -> &'static str {

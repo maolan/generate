@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
     let mut progress = |phase: &str, p: f32, op: &str| {
         eprintln!("[{phase}] {:.0}% {op}", p * 100.0);
     };
-    let pipeline = AceStepPipeline::load(&paths, &device, &mut progress)?;
+    let mut pipeline = AceStepPipeline::load(&paths, &device, &mut progress)?;
 
     let metadata = GenerateMetadata {
         bpm,

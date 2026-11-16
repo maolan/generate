@@ -529,7 +529,7 @@ impl AceStepPipeline {
     ///
     /// Returns `[1, channels, samples]` audio plus its [`GenerateAudioMeta`].
     pub fn generate(
-        &self,
+        &mut self,
         caption: &str,
         metadata: &GenerateMetadata<'_>,
         duration_ms: usize,
@@ -542,7 +542,7 @@ impl AceStepPipeline {
     /// Like [`Self::generate`], but collects per-phase artifacts into `trace`
     /// for debugging and verification (see [`AceStepTrace`]).
     pub fn generate_traced(
-        &self,
+        &mut self,
         caption: &str,
         metadata: &GenerateMetadata<'_>,
         duration_ms: usize,
@@ -554,7 +554,7 @@ impl AceStepPipeline {
     }
 
     fn generate_impl(
-        &self,
+        &mut self,
         caption: &str,
         metadata: &GenerateMetadata<'_>,
         duration_ms: usize,
@@ -585,7 +585,8 @@ impl AceStepPipeline {
             trace.text_prompt = text_prompt.clone();
             trace.lyric_prompt = INSTRUMENTAL_LYRIC_PROMPT.to_string();
         }
-        let mut ids = self.text_tokenizer.encode(&text_prompt, false).ids;
+        let mut ids = Vec::new();
+        self.text_tokenizer.encode(&text_prompt, &mut ids)?;
         ids.truncate(MAX_TEXT_TOKENS);
         // The official appends an explicit EOS (their pipeline encodes with
         // add_eos=true) — the DiT cross-attention sees it as a normal token.
@@ -597,10 +598,9 @@ impl AceStepPipeline {
         progress("text-encoder", 0.3, "encoding caption");
         let text_hidden = self.text_encoder.forward(ids_tensor, true);
 
-        let mut lyric_ids = self
-            .text_tokenizer
-            .encode(INSTRUMENTAL_LYRIC_PROMPT, false)
-            .ids;
+        let mut lyric_ids = Vec::new();
+        self.text_tokenizer
+            .encode(INSTRUMENTAL_LYRIC_PROMPT, &mut lyric_ids)?;
         lyric_ids.truncate(MAX_LYRIC_TOKENS);
         // The official appends an explicit EOS after the lyric template
         // (their pipeline encodes with add_eos=true).

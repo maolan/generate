@@ -505,7 +505,7 @@ fn run_acestep_generation(
         resolve_acestep_model_dir(options.model_dir.as_deref(), options.model, lm_size)?;
     let model_paths =
         AceStepModelPaths::resolve_for_lm(&model_dir, acestep_variant(options.model), lm_size)?;
-    let pipeline = AceStepPipeline::load(&model_paths, device, &mut *progress)?;
+    let mut pipeline = AceStepPipeline::load(&model_paths, device, &mut *progress)?;
     let metadata = GenerateMetadata {
         bpm: options.bpm,
         key_scale: options.key_scale.as_deref(),

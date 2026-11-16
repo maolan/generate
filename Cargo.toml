@@ -1,6 +1,6 @@
 [package]
 name = "maolan-generate"
-version = "0.0.19"
+version = "0.0.20"
 default-run = "maolan-generate"
 description = "Generate music using Maolan and AI"
 edition = "2024"
@@ -24,17 +24,17 @@ burn-store = { version = "0.22.1", default-features = false, features = ["std", 
 half = "2.7.1"
 huggingface-hub = { package = "hf-hub", version = "1.0", default-features = false, features = ["blocking"] }
 maolan-llama = { version = "0.0.4", default-features = false, features = ["llama3", "import"] }
-oxideav-basic = "0.0.11"
-oxideav-core = "0.1.42"
+oxideav-basic = "0.0.12"
+oxideav-core = "0.1.43"
 symphonia = { version = "0.6.1", features = ["wav"] }
 midly = "0.5.3"
-rand = { version = "0.10.3", features = ["std_rng"] }
+rand = { version = "0.10.4", features = ["std_rng"] }
 rayon = "1.12.0"
 safetensors = "0.8.0"
 sentencepiece-rust = "0.1.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
-tokie = "0.1.4"
+tokie = "0.2.0"
 
 [dev-dependencies]
 tempfile = "3"
