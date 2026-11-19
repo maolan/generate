@@ -41,3 +41,30 @@ tempfile = "3"
 
 [build-dependencies]
 anyhow = "1.0.104"
+
+[package.metadata.deb]
+name = "maolan-generate"
+maintainer = "Maolan Team <studio@maolan.rs>"
+section = "sound"
+priority = "optional"
+copyright = "2026, Maolan Team <studio@maolan.rs>"
+depends = "libvulkan1"
+assets = [
+  ["target/release/maolan-generate", "usr/bin/", "755"],
+  ["README.md", "usr/share/doc/maolan-generate/", "644"],
+  ["LICENSE", "usr/share/doc/maolan-generate/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "maolan-generate"
+summary = "Maolan AI Music Generation CLI"
+license = "BSD-2-Clause"
+url = "https://github.com/maolan/generate"
+assets = [
+  { source = "target/release/maolan-generate", dest = "/usr/bin/maolan-generate", mode = "755" },
+  { source = "README.md", dest = "/usr/share/doc/maolan-generate/README.md", mode = "644" },
+  { source = "LICENSE", dest = "/usr/share/doc/maolan-generate/LICENSE", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+vulkan-loader = "*"
