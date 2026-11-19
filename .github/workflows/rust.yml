@@ -229,7 +229,7 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP "maolan-generate-pkg"
           New-Item -ItemType Directory -Force "$stage/${{ env.ASSET_BASENAME }}" | Out-Null
           Copy-Item target/release/maolan-generate.exe "$stage/${{ env.ASSET_BASENAME }}/"
-          Copy-Item LICENSE README.md "$stage/${{ env.ASSET_BASENAME }}/"
+          Copy-Item -Path LICENSE, README.md -Destination "$stage/${{ env.ASSET_BASENAME }}/"
           Compress-Archive -Path "$stage/${{ env.ASSET_BASENAME }}" -DestinationPath "dist/${{ env.ASSET_BASENAME }}.zip"
 
       - name: Upload Windows artifact
