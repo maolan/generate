@@ -4358,7 +4358,7 @@ dependencies = [
 
 [[package]]
 name = "maolan-generate"
-version = "0.0.20"
+version = "0.0.21"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
