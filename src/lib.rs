@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+pub mod download_progress;
 pub mod heartcodec;
 pub mod heartmula_runtime;
 pub mod text_to_midi;

@@ -7,6 +7,7 @@
 use super::amt::tokens_to_events;
 use super::midi::{TimeSignature, write_midi};
 use super::tiktoken_convert::ensure_tiktoken_model;
+use crate::download_progress::download_progress;
 use anyhow::{Context, Result, anyhow, bail};
 use burn::tensor::DType;
 use burn::tensor::{Bool, DataError, Device, Int, Shape, Tensor, TensorData, activation::softmax};
@@ -105,15 +106,21 @@ pub fn resolve_model_paths(model_dir_override: Option<&Path>) -> Result<(PathBuf
     let tokenizer = repo
         .download_file()
         .filename(TOKENIZER_FILENAME)
+        .progress(download_progress(TOKENIZER_FILENAME))
         .send()
         .with_context(|| format!("failed to fetch {MIDI_LLM_REPO_ID}/{TOKENIZER_FILENAME}"))?;
     let checkpoint = repo
         .download_file()
         .filename(SAFETENSORS_FILENAME)
+        .progress(download_progress(SAFETENSORS_FILENAME))
         .send()
         .with_context(|| format!("failed to fetch {MIDI_LLM_REPO_ID}/{SAFETENSORS_FILENAME}"))?;
     // Touch config so the snapshot directory is complete; we don't parse it yet.
-    let _ = repo.download_file().filename(CONFIG_FILENAME).send();
+    let _ = repo
+        .download_file()
+        .filename(CONFIG_FILENAME)
+        .progress(download_progress(CONFIG_FILENAME))
+        .send();
 
     Ok((tokenizer, checkpoint))
 }

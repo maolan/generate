@@ -1,6 +1,6 @@
 [package]
 name = "maolan-generate"
-version = "0.0.21"
+version = "0.0.22"
 default-run = "maolan-generate"
 description = "Generate music using Maolan and AI"
 edition = "2024"
@@ -53,6 +53,7 @@ assets = [
   ["target/release/maolan-generate", "usr/bin/", "755"],
   ["README.md", "usr/share/doc/maolan-generate/", "644"],
   ["LICENSE", "usr/share/doc/maolan-generate/", "644"],
+  ["man/maolan-generate.1", "usr/share/man/man1/", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -64,6 +65,7 @@ assets = [
   { source = "target/release/maolan-generate", dest = "/usr/bin/maolan-generate", mode = "755" },
   { source = "README.md", dest = "/usr/share/doc/maolan-generate/README.md", mode = "644" },
   { source = "LICENSE", dest = "/usr/share/doc/maolan-generate/LICENSE", mode = "644" },
+  { source = "man/maolan-generate.1", dest = "/usr/share/man/man1/maolan-generate.1", mode = "644" },
 ]
 
 [package.metadata.generate-rpm.requires]

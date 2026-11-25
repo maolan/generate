@@ -2240,10 +2240,11 @@ fn sample_token(logits: &Tensor<2>, temperature: f32, topk: usize) -> Result<i64
 
     let token_data = topk_indices
         .slice([0..1, selected_idx..selected_idx + 1])
+        .cast(DType::I64)
         .to_data();
     let token_vec: Vec<i64> = token_data
         .try_to_vec()
-        .map_err(|_| anyhow!("failed to get token"))?;
+        .map_err(|error| anyhow!("failed to get token: {error:?}"))?;
     let token = token_vec[0];
 
     Ok(token)
