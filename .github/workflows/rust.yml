@@ -135,7 +135,7 @@ jobs:
           mkdir -p dist
           mkdir -p "$RUNNER_TEMP/maolan-generate-pkg/${ASSET_BASENAME}"
           cp target/release/maolan-generate "$RUNNER_TEMP/maolan-generate-pkg/${ASSET_BASENAME}/maolan-generate"
-          cp LICENSE README.md "$RUNNER_TEMP/maolan-generate-pkg/${ASSET_BASENAME}/"
+          cp LICENSE README.md man/maolan-generate.1 "$RUNNER_TEMP/maolan-generate-pkg/${ASSET_BASENAME}/"
           tar -C "$RUNNER_TEMP/maolan-generate-pkg" -czf "dist/${ASSET_BASENAME}.tar.gz" "${ASSET_BASENAME}"
           mv target/debian/*.deb dist/
           mv target/generate-rpm/*.rpm dist/
@@ -165,7 +165,7 @@ jobs:
           cargo build --release --workspace
           mkdir -p dist "$RUNNER_TEMP/maolan-generate-pkg/${ASSET_BASENAME}"
           cp target/release/maolan-generate "$RUNNER_TEMP/maolan-generate-pkg/${ASSET_BASENAME}/"
-          cp LICENSE README.md "$RUNNER_TEMP/maolan-generate-pkg/${ASSET_BASENAME}/"
+          cp LICENSE README.md man/maolan-generate.1 "$RUNNER_TEMP/maolan-generate-pkg/${ASSET_BASENAME}/"
           tar -C "$RUNNER_TEMP/maolan-generate-pkg" -czf "dist/${ASSET_BASENAME}.tar.gz" "${ASSET_BASENAME}"
 
       - name: Upload macOS artifact
@@ -229,7 +229,7 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP "maolan-generate-pkg"
           New-Item -ItemType Directory -Force "$stage/${{ env.ASSET_BASENAME }}" | Out-Null
           Copy-Item target/release/maolan-generate.exe "$stage/${{ env.ASSET_BASENAME }}/"
-          Copy-Item -Path LICENSE, README.md -Destination "$stage/${{ env.ASSET_BASENAME }}/"
+          Copy-Item -Path LICENSE, README.md, man/maolan-generate.1 -Destination "$stage/${{ env.ASSET_BASENAME }}/"
           Compress-Archive -Path "$stage/${{ env.ASSET_BASENAME }}" -DestinationPath "dist/${{ env.ASSET_BASENAME }}.zip"
 
       - name: Upload Windows artifact

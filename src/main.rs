@@ -9,8 +9,10 @@ use maolan_generate::heartmula_runtime;
 use maolan_generate::text_to_midi;
 use maolan_generate::{
     AceStepLmSize, BackendChoice, GenerateError, GenerateProgress, GenerateResponseHeader,
-    IPC_MODE_ENV, ModelChoice, help_text, parse_options, read_ipc_message, stderr_logging_enabled,
-    validate_options, write_ipc_message,
+    IPC_MODE_ENV, ModelChoice,
+    download_progress::{download_progress, ipc_stdout},
+    help_text, parse_options, read_ipc_message, stderr_logging_enabled, validate_options,
+    write_ipc_message,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -60,6 +62,7 @@ fn main() -> Result<()> {
     let options = match parse_options(env::args_os()) {
         Ok(options) => options,
         Err(err) if err.to_string() == help_text() => {
+            print!("{}", help_text());
             return Ok(());
         }
         Err(err) => return Err(err),
@@ -213,7 +216,7 @@ fn run_heartmula_supervisor(options: &maolan_generate::CliOptions) -> Result<()>
 
 fn run_ipc() -> Result<()> {
     let mut stdin = io::stdin().lock();
-    let mut stdout = io::stdout().lock();
+    let mut stdout = ipc_stdout();
     let options = validate_options(read_ipc_message(&mut stdin)?)?;
 
     let output = match catch_ipc_generation_failure(AssertUnwindSafe(|| {
@@ -395,6 +398,7 @@ fn ensure_repo_snapshot_dir(repo_id: &str, required_files: &[&'static str]) -> R
         let cached_path = repo
             .download_file()
             .filename(*relative_path)
+            .progress(download_progress(relative_path))
             .send()
             .with_context(|| format!("failed to fetch {repo_id}/{relative_path}"))?;
         let file_snapshot_dir = cached_path.parent().ok_or_else(|| {

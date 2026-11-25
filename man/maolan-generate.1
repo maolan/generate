@@ -1,0 +1,200 @@
+.TH MAOLAN-GENERATE 1 "2026-11-25" "maolan-generate" "User Commands"
+.SH NAME
+maolan-generate \- generate music and MIDI from text prompts
+.SH SYNOPSIS
+.B maolan-generate
+.RI [ options ]
+.I prompt-or-lyrics
+.br
+.B maolan-generate
+.B \-\-decode-only
+.BI \-\-frames-json " path"
+.RI [ options ]
+.SH DESCRIPTION
+.B maolan-generate
+generates audio with HeartMuLa or ACE-Step 1.5, and Standard MIDI Files with
+the deterministic text-to-MIDI generator or MIDI-LLM.
+Model files are downloaded from Hugging Face on first use unless a local model
+directory is supplied.
+.PP
+The default model is
+.B happy-new-year
+and the default backend is
+.BR vulkan .
+Audio is written as WAV and MIDI output is written as a Standard MIDI File.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print command-line help and exit.
+.TP
+.BI \-\-model " name"
+Select the generation model.
+Supported names are
+.BR happy-new-year ,
+.BR RL ,
+.BR acestep-turbo ,
+.BR acestep-sft ,
+.BR text-to-midi ,
+and
+.BR midi-llm .
+.TP
+.BI \-\-model-dir " path"
+Load model files from a local directory instead of resolving them through the
+Hugging Face cache.
+.TP
+.BI \-\-output " path"
+Set the output WAV or MIDI path.
+The default is
+.BR output.wav .
+.TP
+.B \-\-inspect
+Inspect model assets without generating output.
+For text-to-MIDI models, print generator information instead.
+.TP
+.BI \-\-backend " cpu|vulkan"
+Select the CPU or Vulkan runtime backend.
+.TP
+.BI \-\-lyrics " text"
+Set the prompt or lyrics explicitly.
+A positional prompt is also accepted.
+.TP
+.BI \-\-tags " text"
+Set comma-separated style tags for HeartMuLa.
+.TP
+.BI \-\-cfg-scale " float"
+Set HeartMuLa classifier-free guidance scale.
+A value of 1.0 disables guidance, 2.0 gives weak guidance, and 6.0 gives strong
+guidance.
+The default is 1.5.
+.TP
+.BI \-\-length " milliseconds"
+Set HeartMuLa or ACE-Step output length in milliseconds.
+The default is 6000.
+.TP
+.BI \-\-topk " integer"
+Set HeartMuLa top-k sampling.
+The value must be greater than zero.
+The default is 50.
+.TP
+.BI \-\-temperature " float"
+Set HeartMuLa or MIDI-LLM sampling temperature.
+The value must be finite and non-negative.
+The default is 1.0.
+.TP
+.BI \-\-ode-steps " integer"
+Set the number of HeartMuLa flow-matching steps.
+Use 5 for faster generation, 10 for the default quality, or 20 for higher
+quality.
+.TP
+.BI \-\-decoder-seed " integer"
+Set the seed for deterministic HeartCodec decoder latents.
+The default is 0.
+.TP
+.B \-\-decode-only
+Decode an existing HeartMuLa frames JSON file instead of generating tokens.
+Requires
+.BR \-\-frames-json .
+.TP
+.BI \-\-frames-json " path"
+Set the frames JSON input used by
+.BR \-\-decode-only .
+.TP
+.BI \-\-decode-threads " integer"
+Set the number of worker threads for decode-only CPU decoding.
+.TP
+.BI \-\-bpm " float"
+Set the tempo in beats per minute for ACE-Step, text-to-MIDI, or MIDI-LLM.
+The supported range is 20 through 400.
+MIDI generation defaults to 120 BPM.
+.TP
+.BI \-\-key-scale " text"
+Set the musical key for ACE-Step or text-to-MIDI, for example
+.B C major
+or
+.BR "A minor" .
+.TP
+.BI \-\-time-signature " N/D"
+Set the time signature for ACE-Step, text-to-MIDI, or MIDI-LLM, for example
+.B 4/4
+or
+.BR 6/8 .
+.TP
+.BI \-\-acestep-lm " 0.6B|1.7B|4B"
+Select the ACE-Step language-model planner size.
+ACE-Step SFT uses the 4B planner.
+.TP
+.BI \-\-midi-length " seconds"
+Set deterministic text-to-MIDI output length.
+The value must be positive and finite.
+The default is 10.
+.TP
+.BI \-\-midi-seed " integer"
+Set the seed for deterministic text-to-MIDI or MIDI-LLM output.
+The default is 0.
+.TP
+.BI \-\-midi-max-tokens " integer"
+Set the maximum number of MIDI-LLM music tokens to generate.
+The value must be greater than zero.
+The default is 1024.
+.TP
+.BI \-\-midi-top-p " float"
+Set the MIDI-LLM top-p nucleus-sampling threshold.
+The value must be between 0 and 1.
+The default is 0.98.
+.SH EXAMPLES
+Generate HeartMuLa audio with explicit style tags:
+.PP
+.nf
+.RS
+maolan-generate --tags "ambient, cinematic" --output ambient.wav \\
+  "stars drift over the late train home"
+.RE
+.fi
+.PP
+Generate an instrumental ACE-Step track:
+.PP
+.nf
+.RS
+maolan-generate --model acestep-turbo --backend vulkan --bpm 128 \\
+  --key-scale "A minor" --time-signature 4/4 --length 10000 \\
+  --output loop.wav "dark rolling techno groove"
+.RE
+.fi
+.PP
+Generate MIDI without downloading a model:
+.PP
+.nf
+.RS
+maolan-generate --model text-to-midi --bpm 128 --midi-length 10 \\
+  --output loop.mid "dark rolling techno bassline"
+.RE
+.fi
+.PP
+Decode previously generated HeartMuLa frames:
+.PP
+.nf
+.RS
+maolan-generate --decode-only --frames-json output.frames.json \\
+  --output output.wav
+.RE
+.fi
+.SH FILES
+.TP
+.I output.wav
+Default output path.
+.TP
+.I output.frames.json
+Default location for intermediate HeartMuLa frames when the output path is
+.BR output.wav .
+.SH NOTES
+Vulkan generation requires a working Vulkan driver.
+CPU generation is supported through the Burn flex backend.
+Model downloads and local model layouts are described in the project README.
+.SH SEE ALSO
+.BR man (1)
+.PP
+Project documentation:
+.UR https://github.com/maolan/generate
+.UE
+.SH AUTHORS
+Maolan Team <studio@maolan.rs>
