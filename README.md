@@ -21,7 +21,7 @@ and engine live in the repository root and sibling crates.
 The crate currently supports:
 
 - text or lyrics prompts with optional style tags
-- CPU or Vulkan backends
+- CPU, Vulkan, or Metal (macOS) backends
 - adjustable CFG scale, duration, top-k, temperature, and ODE step count
 - decode-only mode from a saved frames JSON
 - local model directory overrides or Hugging Face cache resolution
@@ -31,6 +31,9 @@ The crate currently supports:
   prompt interpreter (`--model text-to-midi`)
 - MIDI-LLM text-to-MIDI generation with the official Llama 3.2 1B checkpoint
   (`--model midi-llm`)
+
+Metal is the default backend on macOS; Vulkan is the default on other platforms.
+Use `--backend cpu` when GPU generation is unavailable.
 
 ## Text-to-MIDI
 

@@ -24,8 +24,10 @@ pub fn stderr_logging_enabled() -> bool {
 #[serde(rename_all = "lowercase")]
 pub enum BackendChoice {
     Cpu,
-    #[default]
+    #[cfg_attr(not(target_os = "macos"), default)]
     Vulkan,
+    #[cfg_attr(target_os = "macos", default)]
+    Metal,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -202,7 +204,7 @@ Options:
   --model-dir <path>
   --output <path>
   --inspect
-  --backend <cpu|vulkan>       Select the runtime backend
+  --backend <cpu|vulkan|metal> Select the runtime backend (default: metal on macOS, vulkan elsewhere)
   --lyrics <text>          Prompt / lyrics (positional argument also accepted)
   --tags <text>            Style tags for HeartMula
   --cfg-scale <float>      CFG scale (1.0=no guidance, 2.0=weak, 6.0=strong)
@@ -234,7 +236,7 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
     let mut output_path = default_output_path();
     let mut inspect_only = false;
     let mut model = ModelChoice::HappyNewYear;
-    let mut backend = BackendChoice::Vulkan;
+    let mut backend = BackendChoice::default();
     let mut cfg_scale = DEFAULT_CFG_SCALE;
     let mut length = 6_000_usize;
     let mut ode_steps = 10_usize;
@@ -274,7 +276,8 @@ pub fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<CliOpti
             backend = match value.as_str() {
                 "cpu" => BackendChoice::Cpu,
                 "vulkan" => BackendChoice::Vulkan,
-                _ => bail!("unsupported backend '{value}', expected one of: cpu, vulkan"),
+                "metal" => BackendChoice::Metal,
+                _ => bail!("unsupported backend '{value}', expected one of: cpu, vulkan, metal"),
             };
             continue;
         }
@@ -836,7 +839,7 @@ mod tests {
         let options = parse_options(args).expect("options should parse");
         assert_eq!(options.prompt, "warm tape hiss");
         assert_eq!(options.model, ModelChoice::HappyNewYear);
-        assert_eq!(options.backend, BackendChoice::Vulkan);
+        assert_eq!(options.backend, BackendChoice::default());
         assert_eq!(options.cfg_scale, 1.5);
         assert_eq!(options.length, 6_000);
     }
@@ -968,6 +971,18 @@ mod tests {
         ];
         let options = parse_options(args).expect("options should parse");
         assert_eq!(options.backend, BackendChoice::Cpu);
+    }
+
+    #[test]
+    fn parses_metal_backend_flag() {
+        let args = [
+            OsString::from("generate"),
+            OsString::from("--backend"),
+            OsString::from("metal"),
+            OsString::from("test prompt"),
+        ];
+        let options = parse_options(args).expect("options should parse");
+        assert_eq!(options.backend, BackendChoice::Metal);
     }
 
     #[test]
@@ -1813,8 +1828,11 @@ mod tests {
     }
 
     #[test]
-    fn backend_choice_default_is_vulkan() {
+    fn backend_choice_default_matches_platform() {
         let default: BackendChoice = Default::default();
+        #[cfg(target_os = "macos")]
+        assert_eq!(default, BackendChoice::Metal);
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(default, BackendChoice::Vulkan);
     }
 

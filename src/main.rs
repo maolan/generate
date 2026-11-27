@@ -102,6 +102,14 @@ fn vulkan_device() -> Result<burn::tensor::Device> {
         .map_err(|error| anyhow!("Failed to initialize Vulkan: {error}"))
 }
 
+fn metal_device() -> Result<burn::tensor::Device> {
+    burn::tensor::Device::wgpu_options()
+        .graphics_api(burn::tensor::wgpu::WgpuBackend::Metal)
+        .memory_config(burn::tensor::wgpu::MemoryConfiguration::ExclusivePages)
+        .init()
+        .map_err(|error| anyhow!("Failed to initialize Metal: {error}"))
+}
+
 fn should_forward_ipc_progress(last_progress: Option<f32>, progress: f32) -> bool {
     match last_progress {
         None => true,
@@ -143,6 +151,15 @@ fn run_decode_with_frames_json(
         ),
         BackendChoice::Vulkan => {
             let device = vulkan_device()?;
+            run_decode_only_with_backend(
+                &device,
+                options,
+                &model_paths.heartcodec_model_dir,
+                frames_json,
+            )
+        }
+        BackendChoice::Metal => {
+            let device = metal_device()?;
             run_decode_only_with_backend(
                 &device,
                 options,
@@ -244,6 +261,15 @@ fn run_ipc() -> Result<()> {
                         &mut stdout,
                     )
                 }
+                BackendChoice::Metal => {
+                    let device = metal_device()?;
+                    run_acestep_ipc_with_backend(
+                        &options,
+                        &device,
+                        BackendChoice::Metal,
+                        &mut stdout,
+                    )
+                }
             };
         }
         match options.backend {
@@ -259,6 +285,10 @@ fn run_ipc() -> Result<()> {
                     BackendChoice::Vulkan,
                     &mut stdout,
                 )
+            }
+            BackendChoice::Metal => {
+                let device = metal_device()?;
+                run_heartmula_ipc_with_backend(&options, &device, BackendChoice::Metal, &mut stdout)
             }
         }
     })) {
@@ -357,6 +387,7 @@ fn backend_name(backend: BackendChoice) -> &'static str {
     match backend {
         BackendChoice::Cpu => "cpu",
         BackendChoice::Vulkan => "vulkan",
+        BackendChoice::Metal => "metal",
     }
 }
 
@@ -616,6 +647,10 @@ fn run_acestep_cli(options: &maolan_generate::CliOptions) -> Result<()> {
             let device = vulkan_device()?;
             run_acestep_cli_with_backend(options, &device)
         }
+        BackendChoice::Metal => {
+            let device = metal_device()?;
+            run_acestep_cli_with_backend(options, &device)
+        }
     }
 }
 
@@ -732,6 +767,17 @@ fn run_midi_llm_cli(options: &maolan_generate::CliOptions) -> Result<()> {
                 &options.output_path,
             )
         }
+        BackendChoice::Metal => {
+            let device = metal_device()?;
+            text_to_midi::generate_midi_file_with_llm(
+                &config,
+                &device,
+                &options.prompt,
+                options.bpm.unwrap_or(120.0),
+                time_signature,
+                &options.output_path,
+            )
+        }
     }?;
     println!("wrote {}", options.output_path.display());
     Ok(())
@@ -785,6 +831,17 @@ fn run_midi_llm_ipc(
         }
         BackendChoice::Vulkan => {
             let device = vulkan_device()?;
+            text_to_midi::generate_midi_file_with_llm(
+                &config,
+                &device,
+                &options.prompt,
+                options.bpm.unwrap_or(120.0),
+                time_signature,
+                &options.output_path,
+            )
+        }
+        BackendChoice::Metal => {
+            let device = metal_device()?;
             text_to_midi::generate_midi_file_with_llm(
                 &config,
                 &device,
@@ -1131,6 +1188,7 @@ fn run_heartmula_cli(options: &maolan_generate::CliOptions) -> Result<()> {
     match options.backend {
         BackendChoice::Cpu => run_heartmula_cpu(options),
         BackendChoice::Vulkan => run_heartmula_vulkan(options),
+        BackendChoice::Metal => run_heartmula_metal(options),
     }
 }
 
@@ -1210,6 +1268,11 @@ fn run_heartmula_vulkan(options: &maolan_generate::CliOptions) -> Result<()> {
     run_heartmula_with_backend(&device, options, BackendChoice::Vulkan)
 }
 
+fn run_heartmula_metal(options: &maolan_generate::CliOptions) -> Result<()> {
+    let device = metal_device()?;
+    run_heartmula_with_backend(&device, options, BackendChoice::Metal)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1232,6 +1295,14 @@ mod tests {
     }
     use crate::heartmula_runtime::normalize_tags;
     use std::{collections::BTreeMap, env, fs};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires a Metal-compatible GPU"]
+    fn metal_device_initializes() {
+        let device = super::metal_device().expect("Metal device should initialize");
+        super::release_backend_allocations(&device).expect("Metal device should synchronize");
+    }
 
     #[test]
     fn normalize_tags_wraps_and_lowercases() {
