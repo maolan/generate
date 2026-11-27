@@ -1,6 +1,6 @@
 [package]
 name = "maolan-generate"
-version = "0.0.22"
+version = "0.0.23"
 default-run = "maolan-generate"
 description = "Generate music using Maolan and AI"
 edition = "2024"
@@ -36,7 +36,6 @@ serde_json = "1.0.154"
 tokie = "0.2.0"
 
 [dev-dependencies]
-symphonia = { version = "0.6.1", features = ["wav"] }
 tempfile = "3"
 
 [build-dependencies]

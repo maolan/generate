@@ -2649,84 +2649,97 @@ mod tests {
     }
 
     fn read_wav_f32(path: &std::path::Path) -> WavInfo {
-        use symphonia::core::audio::sample::SampleFormat;
-        use symphonia::core::codecs::audio::{AudioDecoderOptions, CODEC_ID_NULL_AUDIO};
-        use symphonia::core::errors::Error as SymphoniaError;
-        use symphonia::core::formats::FormatOptions;
-        use symphonia::core::formats::probe::Hint;
-        use symphonia::core::io::MediaSourceStream;
-        use symphonia::core::meta::MetadataOptions;
+        use oxideav_core::{Frame, MediaType, RuntimeContext, SampleFormat};
 
-        let file = std::fs::File::open(path).expect("open wav");
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
-        let mut hint = Hint::new();
-        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-            hint.with_extension(ext);
-        }
-        let mut format = symphonia::default::get_probe()
-            .probe(
-                &hint,
-                mss,
-                FormatOptions::default(),
-                MetadataOptions::default(),
-            )
+        let mut ctx = RuntimeContext::new();
+        oxideav_basic::register(&mut ctx);
+        let mut input: Box<dyn oxideav_core::ReadSeek> =
+            Box::new(std::fs::File::open(path).expect("open wav"));
+        let container = ctx
+            .containers
+            .probe_input(&mut *input, Some("wav"))
             .expect("probe wav");
-        let track = format
-            .tracks()
+        let mut demuxer = ctx
+            .containers
+            .open_demuxer(&container, input, &ctx.codecs)
+            .expect("open wav");
+        let stream = demuxer
+            .streams()
             .iter()
-            .find(|t| {
-                t.codec_params
-                    .as_ref()
-                    .and_then(|p| p.audio())
-                    .map(|p| p.codec != CODEC_ID_NULL_AUDIO)
-                    .unwrap_or(false)
-            })
-            .or_else(|| format.tracks().first())
+            .find(|stream| stream.params.media_type == MediaType::Audio)
+            .cloned()
             .expect("audio track");
-        let codec_params = track
-            .codec_params
-            .as_ref()
-            .and_then(|p| p.audio())
-            .expect("audio codec params");
-        let channels = codec_params
-            .channels
-            .as_ref()
-            .map(|c| c.count())
-            .unwrap_or(1);
-        let sample_rate = codec_params.sample_rate.unwrap_or(48_000);
-        let bits_per_sample = codec_params.bits_per_sample.unwrap_or(32);
-        let sample_format = codec_params.sample_format;
-        let is_float = sample_format
-            .map(|f| matches!(f, SampleFormat::F32 | SampleFormat::F64))
-            .unwrap_or(true);
-        let track_id = track.id;
-        let mut decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(codec_params, &AudioDecoderOptions::default())
+        let channels = stream.params.channels.unwrap_or(1) as usize;
+        let sample_rate = stream.params.sample_rate.unwrap_or(48_000);
+        let sample_format = stream.params.sample_format.unwrap_or(SampleFormat::F32);
+        let bits_per_sample = (sample_format.bytes_per_sample() * 8) as u16;
+        let is_float = sample_format.is_float();
+        let stream_index = stream.index;
+        let mut decoder = ctx
+            .codecs
+            .first_decoder(&stream.params)
             .expect("create decoder");
         let mut samples = Vec::new();
         loop {
-            let packet = match format.next_packet() {
-                Ok(Some(packet)) => packet,
-                Ok(None) => break,
-                Err(SymphoniaError::IoError(e))
-                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-                {
-                    break;
+            match demuxer.next_packet() {
+                Ok(packet) => {
+                    if packet.stream_index != stream_index {
+                        continue;
+                    }
+                    decoder.send_packet(&packet).expect("decode packet");
+                    loop {
+                        match decoder.receive_frame() {
+                            Ok(Frame::Audio(frame)) => {
+                                let plane = frame.data.first().expect("packed PCM plane");
+                                for bytes in plane.chunks_exact(sample_format.bytes_per_sample()) {
+                                    let sample = match sample_format {
+                                        SampleFormat::U8 => (bytes[0] as f32 - 128.0) / 128.0,
+                                        SampleFormat::S16 => {
+                                            i16::from_le_bytes([bytes[0], bytes[1]]) as f32
+                                                / i16::MAX as f32
+                                        }
+                                        SampleFormat::S24 => {
+                                            let value = i32::from_le_bytes([
+                                                bytes[0],
+                                                bytes[1],
+                                                bytes[2],
+                                                if bytes[2] & 0x80 != 0 { 0xff } else { 0 },
+                                            ]);
+                                            value as f32 / 8_388_607.0
+                                        }
+                                        SampleFormat::S32 => {
+                                            i32::from_le_bytes(bytes.try_into().expect("S32"))
+                                                as f32
+                                                / i32::MAX as f32
+                                        }
+                                        SampleFormat::F32 => {
+                                            f32::from_le_bytes(bytes.try_into().expect("F32"))
+                                        }
+                                        SampleFormat::F64 => {
+                                            f64::from_le_bytes(bytes.try_into().expect("F64"))
+                                                as f32
+                                        }
+                                        other => panic!("unsupported sample format {other:?}"),
+                                    };
+                                    samples.push(sample);
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(oxideav_core::Error::NeedMore | oxideav_core::Error::Eof) => {
+                                break;
+                            }
+                            Err(e) => panic!("decode error: {e}"),
+                        }
+                    }
                 }
+                Err(oxideav_core::Error::Eof) => break,
                 Err(e) => panic!("read error: {e}"),
-            };
-            if packet.track_id != track_id {
-                continue;
             }
-            let decoded = decoder.decode(&packet).expect("decode packet");
-            let mut packet_samples = Vec::new();
-            decoded.copy_to_vec_interleaved(&mut packet_samples);
-            samples.extend_from_slice(&packet_samples);
         }
         WavInfo {
             channels: channels as u16,
             sample_rate,
-            bits_per_sample: bits_per_sample as u16,
+            bits_per_sample,
             is_float,
             samples,
         }
